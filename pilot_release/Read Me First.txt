@@ -1,0 +1,107 @@
+HYLIGHT PILOT  -  v0.4.0                                  Danko Panko's HyLight
+==========================================================================
+
+HyLight turns your HyLight button into a glucose light. It reads your Dexcom
+numbers and glows a color when something needs your attention.
+
+IMPORTANT: This is a pilot of a convenience light. It is NOT a medical device.
+Keep using your Dexcom app and its alarms exactly as you do today.
+
+
+WHAT YOU NEED
+-------------
+ - A Mac running macOS 11 or newer, and your HyLight button
+ - A Dexcom CGM with Dexcom Share turned on (Dexcom app > Settings > Share,
+   with at least one follower added)
+ - The Dexcom login of the person WEARING the sensor. Do not use a
+   follower's account - it will log in but show no readings.
+
+
+SET UP (about 5 minutes)
+------------------------
+1. Unzip, then drag HyLight.app into your Applications folder.
+   (Which zip? Apple menu > About This Mac. "Apple M1/M2/M3..." = Apple
+   Silicon zip. "Intel" = Intel zip.)
+
+2. Plug in the button.
+
+3. Open HyLight. The first time, macOS will say it can't verify the app,
+   because it isn't from the App Store yet. This is expected. To open it:
+     macOS 15 (Sequoia) or newer:  click Done, open System Settings >
+        Privacy & Security, scroll down to Security, click "Open Anyway"
+        next to HyLight, then enter your Mac password.
+     macOS 14 or older:  right-click (or Control-click) HyLight.app, choose
+        Open, then click Open.
+   Still stuck? Open the Terminal app and paste this one line, then try again:
+        xattr -dr com.apple.quarantine /Applications/HyLight.app
+
+4. Your browser opens HyLight's settings page. Sign in with the Dexcom login
+   of the person wearing the sensor, pick your region, and click Connect.
+
+5. macOS may ask for permission. Say yes to both:
+     - "Input Monitoring": needed to talk to the button. If you're sent to
+       System Settings, switch HyLight ON, then quit and reopen HyLight.
+     - Keychain access: this is where your Dexcom login is stored safely.
+       If it asks for a password, that is your Mac login password.
+       Choose "Always Allow".
+
+6. The status line at the top of the page should say
+   "Button connected - showing ... BG ...". You're set.
+
+TIP: If you close the settings page, double-click HyLight again (or choose
+"Open HyLight Settings" from the HyLight menu at the top of the screen) to
+bring it back. It lives at http://127.0.0.1:8765 if you'd like a bookmark.
+
+
+USING THE BUTTON
+----------------
+ Colors   GREEN  = in range (only shown when you tap the button)
+          WHITE  = glucose is ramping up
+          YELLOW = high: above your yellow threshold
+          RED    = very high: above your red threshold
+          PURPLE = low: below 70
+          BLUE   = your reminder timer finished
+ Tap          Shows your current status for 3 seconds, any time of day.
+ Press & hold Mutes the current alert for a while. Hold again to un-mute.
+ Double tap   Starts a reminder timer (default 20 minutes). The button
+              flashes blue to confirm, then glows blue when time is up.
+
+Automatic lights only happen inside your "active window" (default 11:30 AM -
+8:00 PM). Change the window, thresholds, mute length and reminder time on
+the settings page.
+
+
+QUITTING AND RESTARTING
+-----------------------
+Quit any normal way: "Quit HyLight" at the bottom of the settings page, the
+HyLight menu at the top of the screen, Cmd+Q, or right-click the Dock icon >
+Quit. Each turns the light off. The goodbye page after "Quit HyLight" has a
+"Restart HyLight instead" button if you meant to restart it.
+If the app is ever force-quit, the button can stay lit. Just open HyLight
+again and quit it normally.
+To stop using HyLight: click "Disconnect Dexcom account" on the settings
+page, quit, then delete the app.
+
+
+IF SOMETHING LOOKS WRONG
+------------------------
+ "Button not detected": unplug and replug the button, and check Input
+    Monitoring in System Settings > Privacy & Security.
+ No light when you expect one: look at the status line at the top of the
+    page. It shows the BG HyLight sees and what it is showing. Remember
+    automatic lights only appear inside the active window.
+ No BG number at all: Share is probably off, or you signed in with a
+    follower's account. Disconnect, then sign in again with the wearer's.
+
+
+FEEDBACK
+--------
+Please tell me about anything confusing, wrong, or annoying - including
+whether the colors and timing feel right in real life. If something breaks,
+send me this log file:  ~/.dexcom_led_button/hylight.log
+(In Finder: Go menu > Go to Folder..., paste ~/.dexcom_led_button, press
+Return.) It records your glucose readings and Dexcom username, but never
+your password. Share it only if you are comfortable doing so.
+
+Privacy: HyLight only talks to Dexcom's servers and to your own Mac. Your
+Dexcom login is kept in your Mac's Keychain.

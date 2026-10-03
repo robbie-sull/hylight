@@ -1,0 +1,17 @@
+# Build output (rebuild with PyInstaller; these are per-platform)
+build/
+dist/
+dist_*/
+*.app
+# Release bundles
+pilot_release/*.zip
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
