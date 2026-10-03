@@ -248,5 +248,57 @@ class WebFlowTests(unittest.TestCase):
         self.assertFalse(self.controller.consume_restart_requested())
 
 
+class LedWriteTests(unittest.TestCase):
+    """Windows rejects the feature report (the descriptor declares none), so
+    there the same bytes go out with write(). Probed on real hardware."""
+
+    def _button(self):
+        with mock.patch.object(app.hid, "enumerate", return_value=[]):
+            button = app.LedButton()
+        button.device = mock.Mock()
+        button.connected = True
+        return button
+
+    def test_windows_uses_output_report(self):
+        button = self._button()
+        with mock.patch.object(app.sys, "platform", "win32"):
+            button.set_color("green")
+        button.device.write.assert_called_once_with([0x00, *app.COLORS["green"]])
+        button.device.send_feature_report.assert_not_called()
+
+    def test_mac_uses_feature_report(self):
+        button = self._button()
+        with mock.patch.object(app.sys, "platform", "darwin"):
+            button.set_color("red")
+        button.device.send_feature_report.assert_called_once_with([0x00, *app.COLORS["red"]])
+        button.device.write.assert_not_called()
+
+
+class PidCheckTests(unittest.TestCase):
+    def test_windows_never_calls_os_kill(self):
+        # os.kill(pid, 0) on Windows terminates the process it is "checking".
+        with mock.patch.object(app.sys, "platform", "win32"), \
+                mock.patch.object(app, "_pid_is_alive_windows", return_value=True) as win, \
+                mock.patch.object(app.os, "kill", side_effect=AssertionError("os.kill on Windows")):
+            self.assertTrue(app._pid_is_alive(1234))
+        win.assert_called_once_with(1234)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX path")
+    def test_posix_live_and_dead_pids(self):
+        import subprocess
+        self.assertTrue(app._pid_is_alive(app.os.getpid()))
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        self.assertFalse(app._pid_is_alive(child.pid))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows path")
+    def test_windows_live_and_dead_pids(self):
+        import subprocess
+        self.assertTrue(app._pid_is_alive(app.os.getpid()))
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        self.assertFalse(app._pid_is_alive(child.pid))
+
+
 if __name__ == "__main__":
     unittest.main()

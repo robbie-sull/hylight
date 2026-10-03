@@ -113,7 +113,12 @@ testing, the reliable way to drive the LED turned out to be:
 
     device.send_feature_report([0x00, enable, r, g, b])
 
-where byte layout is [report_id=0, enable_flag, R, G, B]. "Off" is
+where byte layout is [report_id=0, enable_flag, R, G, B]. On Windows
+that call fails ("Incorrect function"): Windows checks feature reports
+against the descriptor, which declares none. There the same five bytes
+go out as an Output report instead -- device.write([0x00, enable, r, g,
+b]) -- confirmed by eye on Windows 10 (green, then off; enable=0 still
+ignored; the faint red glow at "off" is still there). "Off" is
 enable=1 with R=G=B=0 -- enable=0 is silently ignored by the firmware
 (confirmed: it doesn't change anything, including turning the light
 off), which is why every entry in COLORS below uses enable=1.
@@ -360,7 +365,11 @@ class LedButton:
         enable, r, g, b = COLORS[name]
         try:
             with self.lock:
-                self.device.send_feature_report([0x00, enable, r, g, b])
+                report = [0x00, enable, r, g, b]
+                if sys.platform == "win32":
+                    self.device.write(report)
+                else:
+                    self.device.send_feature_report(report)
         except Exception:
             self._handle_io_failure("LED write")
 
@@ -1055,6 +1064,9 @@ LOCK_PATH = CONFIG_DIR / "app.lock"
 
 
 def _pid_is_alive(pid):
+    # Never os.kill(pid, 0) on Windows: there it terminates the process.
+    if sys.platform == "win32":
+        return _pid_is_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1062,6 +1074,32 @@ def _pid_is_alive(pid):
     except PermissionError:
         return True  # exists, just owned by someone else
     return True
+
+
+def _pid_is_alive_windows(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ERROR_ACCESS_DENIED = 5
+    STILL_ACTIVE = 259
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Access denied means it exists but belongs to someone else.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        # A handle can outlive the process; only STILL_ACTIVE means running.
+        return code.value == STILL_ACTIVE
+    finally:
+        k32.CloseHandle(handle)
 
 
 def _acquire_single_instance_lock():
