@@ -378,5 +378,32 @@ class TrayTests(unittest.TestCase):
             self.assertIsNone(app._start_tray("http://x", mock.Mock()))
 
 
+class WindowsRelaunchTests(unittest.TestCase):
+    """os.execv on Windows spawns a child and exits instead of replacing the
+    process, so Windows restarts by starting a fresh copy explicitly."""
+
+    def _relaunch(self, frozen):
+        flags = dict(DETACHED_PROCESS=0x8, CREATE_NEW_PROCESS_GROUP=0x200, CREATE_NEW_CONSOLE=0x10)
+        with mock.patch.object(app.sys, "platform", "win32"), \
+                mock.patch.object(app.sys, "frozen", frozen, create=True), \
+                mock.patch.multiple(app.subprocess, create=True, **flags), \
+                mock.patch.object(app.subprocess, "Popen") as popen, \
+                mock.patch.object(app.os, "execv", side_effect=AssertionError("execv on Windows")):
+            app._relaunch_app()
+        popen.assert_called_once()
+        return popen.call_args
+
+    def test_packaged_exe_starts_detached_copy(self):
+        args, kwargs = self._relaunch(frozen=True)
+        self.assertEqual(args[0], [sys.executable])
+        self.assertEqual(kwargs["creationflags"], 0x8 | 0x200)
+        self.assertIs(kwargs["stdout"], app.subprocess.DEVNULL)
+
+    def test_source_run_starts_copy_in_new_console(self):
+        args, kwargs = self._relaunch(frozen=False)
+        self.assertEqual(args[0], [sys.executable] + sys.argv)
+        self.assertEqual(kwargs["creationflags"], 0x10)
+
+
 if __name__ == "__main__":
     unittest.main()

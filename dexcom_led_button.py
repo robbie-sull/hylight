@@ -1171,6 +1171,10 @@ def _relaunch_app():
         if candidate.suffix == ".app":
             bundle = candidate
 
+    if sys.platform == "win32":
+        _relaunch_windows()
+        return
+
     if bundle is None:
         # Running from source: re-exec in place.
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -1212,6 +1216,31 @@ def _start_tray(url, controller):
     except Exception:
         log.warning("Couldn't show the tray icon -- the settings page still works.", exc_info=True)
         return None
+
+
+def _relaunch_windows():
+    """os.execv on Windows doesn't replace the process -- it spawns a child
+    and exits, leaving the console in a muddle -- so start a fresh copy
+    explicitly. Called after _shutdown_resources(), so the button, the
+    lock and the port are already free; this process exits right after."""
+    if getattr(sys, "frozen", False):
+        # Packaged HyLight.exe: no console, fully detached from this one.
+        subprocess.Popen(
+            [sys.executable],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        # From source: a console of its own, so its log output stays visible.
+        subprocess.Popen(
+            [sys.executable] + sys.argv,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            close_fds=True,
+        )
+    log.info("Restarting: started a fresh copy")
 
 
 # --------------------------------------------------------------------------
