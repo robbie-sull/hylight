@@ -248,5 +248,162 @@ class WebFlowTests(unittest.TestCase):
         self.assertFalse(self.controller.consume_restart_requested())
 
 
+class LedWriteTests(unittest.TestCase):
+    """Windows rejects the feature report (the descriptor declares none), so
+    there the same bytes go out with write(). Probed on real hardware."""
+
+    def _button(self):
+        with mock.patch.object(app.hid, "enumerate", return_value=[]):
+            button = app.LedButton()
+        button.device = mock.Mock()
+        button.connected = True
+        return button
+
+    def test_windows_uses_output_report(self):
+        button = self._button()
+        with mock.patch.object(app.sys, "platform", "win32"):
+            button.set_color("green")
+        button.device.write.assert_called_once_with([0x00, *app.COLORS["green"]])
+        button.device.send_feature_report.assert_not_called()
+
+    def test_mac_uses_feature_report(self):
+        button = self._button()
+        with mock.patch.object(app.sys, "platform", "darwin"):
+            button.set_color("red")
+        button.device.send_feature_report.assert_called_once_with([0x00, *app.COLORS["red"]])
+        button.device.write.assert_not_called()
+
+
+class PidCheckTests(unittest.TestCase):
+    def test_windows_never_calls_os_kill(self):
+        # os.kill(pid, 0) on Windows terminates the process it is "checking".
+        with mock.patch.object(app.sys, "platform", "win32"), \
+                mock.patch.object(app, "_pid_is_alive_windows", return_value=True) as win, \
+                mock.patch.object(app.os, "kill", side_effect=AssertionError("os.kill on Windows")):
+            self.assertTrue(app._pid_is_alive(1234))
+        win.assert_called_once_with(1234)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX path")
+    def test_posix_live_and_dead_pids(self):
+        import subprocess
+        self.assertTrue(app._pid_is_alive(app.os.getpid()))
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        self.assertFalse(app._pid_is_alive(child.pid))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows path")
+    def test_windows_live_and_dead_pids(self):
+        import subprocess
+        self.assertTrue(app._pid_is_alive(app.os.getpid()))
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        self.assertFalse(app._pid_is_alive(child.pid))
+
+
+class _FakePystray:
+    """Stands in for pystray, which needs a real desktop to import."""
+
+    class MenuItem:
+        def __init__(self, text, action, default=False):
+            self.text, self.action, self.default = text, action, default
+
+    class Menu:
+        SEPARATOR = object()
+
+        def __init__(self, *items):
+            self.items = items
+
+    class Icon:
+        def __init__(self, name, image, title, menu):
+            self.name, self.image, self.title, self.menu = name, image, title, menu
+            self.detached = self.stopped = False
+
+        def run_detached(self):
+            self.detached = True
+
+        def stop(self):
+            self.stopped = True
+
+
+class TrayTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(sys.modules, {"pystray": _FakePystray})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        sys.modules.pop("tray_loop", None)
+        self.addCleanup(sys.modules.pop, "tray_loop", None)
+        import tray_loop
+        self.tray_loop = tray_loop
+
+    def _items(self, icon):
+        return [i for i in icon.menu.items if isinstance(i, _FakePystray.MenuItem)]
+
+    def test_icon_image_is_trimmed_and_tray_sized(self):
+        image = self.tray_loop._load_image()
+        self.assertEqual(image.size, (64, 64))
+        self.assertEqual(image.mode, "RGBA")
+
+    def test_menu_wiring(self):
+        opened, quit_ = [], []
+        icon = self.tray_loop.start(lambda: opened.append(1), lambda: quit_.append(1))
+        self.assertTrue(icon.detached)
+        open_item, quit_item = self._items(icon)
+        self.assertEqual(open_item.text, "Open HyLight Settings")
+        self.assertTrue(open_item.default)  # left-click opens settings
+        self.assertEqual(quit_item.text, "Quit HyLight")
+        open_item.action(icon, open_item)
+        self.assertEqual((opened, quit_), ([1], []))
+        quit_item.action(icon, quit_item)
+        self.assertEqual(quit_, [1])
+        self.tray_loop.stop(icon)
+        self.assertTrue(icon.stopped)
+
+    def test_tray_quit_stops_the_real_web_server(self):
+        from werkzeug.serving import make_server
+        server = make_server("127.0.0.1", 0, web_ui.create_app(app.Config.load(), app.MonitorController(FakeButton(), app.Config.load())))
+        controller = mock.Mock()
+        controller.request_shutdown.side_effect = lambda: threading.Thread(target=server.shutdown, daemon=True).start()
+        icon = app._start_tray("http://127.0.0.1:1", controller)
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        time.sleep(0.2)
+        self._items(icon)[1].action(icon, None)
+        serving.join(3)
+        self.assertFalse(serving.is_alive(), "Quit from the tray didn't stop the server")
+        server.server_close()
+
+    def test_tray_failure_doesnt_stop_the_app(self):
+        with mock.patch.dict(sys.modules, {"pystray": None}):
+            sys.modules.pop("tray_loop", None)
+            self.assertIsNone(app._start_tray("http://x", mock.Mock()))
+
+
+class WindowsRelaunchTests(unittest.TestCase):
+    """os.execv on Windows spawns a child and exits instead of replacing the
+    process, so Windows restarts by starting a fresh copy explicitly."""
+
+    def _relaunch(self, frozen):
+        flags = dict(DETACHED_PROCESS=0x8, CREATE_NEW_PROCESS_GROUP=0x200, CREATE_NEW_CONSOLE=0x10)
+        with mock.patch.object(app.sys, "platform", "win32"), \
+                mock.patch.object(app.sys, "frozen", frozen, create=True), \
+                mock.patch.multiple(app.subprocess, create=True, **flags), \
+                mock.patch.object(app.subprocess, "Popen") as popen, \
+                mock.patch.object(app.os, "execv", side_effect=AssertionError("execv on Windows")):
+            app._relaunch_app()
+        popen.assert_called_once()
+        return popen.call_args
+
+    def test_packaged_exe_starts_detached_copy(self):
+        args, kwargs = self._relaunch(frozen=True)
+        self.assertEqual(args[0], [sys.executable])
+        self.assertEqual(kwargs["creationflags"], 0x8 | 0x200)
+        self.assertIs(kwargs["stdout"], app.subprocess.DEVNULL)
+
+    def test_source_run_starts_copy_in_new_console(self):
+        args, kwargs = self._relaunch(frozen=False)
+        self.assertEqual(args[0], [sys.executable] + sys.argv)
+        self.assertEqual(kwargs["creationflags"], 0x10)
+
+
 if __name__ == "__main__":
     unittest.main()
