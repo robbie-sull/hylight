@@ -270,10 +270,13 @@ COLORS = {
     "white": (0x01, 0xFF, 0xFF, 0xFF),    # R + G + B
 }
 
+# A windowed Windows exe has no console: sys.stderr is None there, so only
+# log to the console when there is one (the log file below always works).
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s.%(msecs)03d  %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler()] if sys.stderr is not None else [],
 )
 log = logging.getLogger("led-button")
 

@@ -16,9 +16,12 @@ reports what they see by eye; Claude cannot see the LED.
 | `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work. |
 | `tray_loop.py` | **Windows only** (pystray + Pillow). Tray icon: "Open HyLight Settings" (also left-click) and "Quit HyLight". Runs on its own thread; `main()` keeps `serve_forever()` and stops the icon in its `finally`. |
 | `HyLight.spec` | **macOS** PyInstaller spec -> `HyLight.app`. |
+| `HyLight_win.spec` | **Windows** PyInstaller spec -> `dist/HyLight/HyLight.exe` (onedir, no console, Credential Manager + pystray backends, version info). Only builds on Windows. |
+| `build_windows.bat` | Windows build via `uv` (Python 3.13): runs the spec, then zips `dist/HyLight` + the Windows guide into `dist/HyLight-Windows-<ver>.zip`. |
 | `tests/test_core.py` | Platform-independent tests, all against fakes. `python3 -m unittest discover -s tests -v` |
-| `assets/` | `HyLight.icns` (mac), `HyLight_icon_1024.png` (source art for a Windows `.ico`; has macOS-style padding), header logo files. |
+| `assets/` | `HyLight.icns` (mac), `HyLight.ico` (Windows; padding trimmed, 16-256 px), `HyLight_icon_1024.png` (source art, also the tray icon), header logo files. |
 | `pilot_release/Read Me First.txt` | Tester guide that ships in the Mac zips. Keep it in sync with behavior. |
+| `pilot_release/Read Me First (Windows).txt` | Windows tester guide (shipped as `Read Me First.txt` in the Windows zip). Keep in sync too. |
 
 ## Behavior (see module docstring for full detail)
 
