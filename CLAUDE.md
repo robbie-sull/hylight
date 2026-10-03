@@ -14,6 +14,7 @@ reports what they see by eye; Claude cannot see the LED.
 | `web_ui.py` | Local Flask settings UI (127.0.0.1:8765). One file, inline HTML/CSS/JS, logo embedded as base64 (`assets/logo_header_b64.txt`). Routes: `/`, `/login`, `/settings`, `/disconnect`, `/quit`, `/restart`, `/status`. |
 | `config.py` | `Config`: JSON settings in `~/.dexcom_led_button/config.json`. |
 | `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work. |
+| `tray_loop.py` | **Windows only** (pystray + Pillow). Tray icon: "Open HyLight Settings" (also left-click) and "Quit HyLight". Runs on its own thread; `main()` keeps `serve_forever()` and stops the icon in its `finally`. |
 | `HyLight.spec` | **macOS** PyInstaller spec -> `HyLight.app`. |
 | `tests/test_core.py` | Platform-independent tests, all against fakes. `python3 -m unittest discover -s tests -v` |
 | `assets/` | `HyLight.icns` (mac), `HyLight_icon_1024.png` (source art for a Windows `.ico`; has macOS-style padding), header logo files. |
@@ -128,7 +129,8 @@ relaunch, Keychain wording in log messages, `LSMinimumSystemVersion`/BUNDLE sett
 - Verify before claiming: run it, look at the real output. If something can only be judged on
   the physical LED, say so and ask the owner to look.
 - Don't commit or push without being asked. Keep answers short and plain.
-- Dev setup: Python 3.9+, `pip install pydexcom hidapi keyring flask` (+ `pyinstaller` to build).
+- Dev setup: Python 3.9+, `pip install pydexcom hidapi keyring flask` (+ `pystray pillow` on Windows,
+  + `pyinstaller` to build).
   Run from source: `python3 dexcom_led_button.py` (opens http://127.0.0.1:8765).
 
 ## Branding (for any new UI/assets)

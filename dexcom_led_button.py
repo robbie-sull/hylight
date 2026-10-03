@@ -1193,6 +1193,27 @@ def _relaunch_app():
     )
 
 
+def _start_tray(url, controller):
+    """Windows: shows the tray icon (Open settings / Quit). Returns the
+    icon, or None if the tray couldn't be started -- the app still runs,
+    reachable through its settings page."""
+    try:
+        import tray_loop
+
+        def _on_open():
+            log.info("Tray: opening the settings page")
+            webbrowser.open(url)
+
+        def _on_quit():
+            log.info("Quit requested from the tray icon")
+            controller.request_shutdown()
+
+        return tray_loop.start(_on_open, _on_quit)
+    except Exception:
+        log.warning("Couldn't show the tray icon -- the settings page still works.", exc_info=True)
+        return None
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -1219,6 +1240,7 @@ def main():
     controller = None
     button = None
     server = None
+    tray_icon = None
     try:
         cfg = Config.load()
 
@@ -1293,10 +1315,16 @@ def main():
 
             native_loop.run(server.serve_forever, _on_native_terminate, _on_native_reopen)
         else:
+            if sys.platform == "win32":
+                tray_icon = _start_tray(url, controller)
             server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if tray_icon is not None:
+            # Its thread isn't a daemon: the process can't exit until it stops.
+            import tray_loop
+            tray_loop.stop(tray_icon)
         restart = controller is not None and controller.consume_restart_requested()
         _shutdown_resources(button, server)
         if restart:
