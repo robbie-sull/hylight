@@ -75,9 +75,9 @@ Quit with "Quit HyLight" at the bottom of the settings page, or right-click
 the sun icon by the clock and choose "Quit HyLight". Either turns the light
 off. The goodbye page after "Quit HyLight" has a "Restart HyLight instead"
 button if you meant to restart it.
-If HyLight is ever ended from Task Manager, or the PC shuts down while it's
-running, the button can stay lit. Just open HyLight again and quit it
-normally.
+Shutting down or signing out of Windows also turns the light off.
+If HyLight is ever ended from Task Manager, the button can stay lit. Just
+open HyLight again and quit it normally.
 To stop using HyLight: click "Disconnect Dexcom account" on the settings
 page, quit, then delete the HyLight folder.
 

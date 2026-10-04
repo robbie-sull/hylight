@@ -347,6 +347,7 @@ class _FakePystray:
         def __init__(self, name, image, title, menu):
             self.name, self.image, self.title, self.menu = name, image, title, menu
             self.detached = self.stopped = False
+            self._message_handlers = {}  # as in pystray's Windows backend
 
         def run_detached(self):
             self.detached = True
@@ -375,7 +376,7 @@ class TrayTests(unittest.TestCase):
 
     def test_menu_wiring(self):
         opened, quit_ = [], []
-        icon = self.tray_loop.start(lambda: opened.append(1), lambda: quit_.append(1))
+        icon = self.tray_loop.start(lambda: opened.append(1), lambda: quit_.append(1), lambda: None)
         self.assertTrue(icon.detached)
         open_item, quit_item = self._items(icon)
         self.assertEqual(open_item.text, "Open HyLight Settings")
@@ -393,7 +394,7 @@ class TrayTests(unittest.TestCase):
         server = make_server("127.0.0.1", 0, web_ui.create_app(app.Config.load(), app.MonitorController(FakeButton(), app.Config.load())))
         controller = mock.Mock()
         controller.request_shutdown.side_effect = lambda: threading.Thread(target=server.shutdown, daemon=True).start()
-        icon = app._start_tray("http://127.0.0.1:1", controller)
+        icon = app._start_tray("http://127.0.0.1:1", controller, FakeButton(), server)
         serving = threading.Thread(target=server.serve_forever, daemon=True)
         serving.start()
         time.sleep(0.2)
@@ -405,7 +406,31 @@ class TrayTests(unittest.TestCase):
     def test_tray_failure_doesnt_stop_the_app(self):
         with mock.patch.dict(sys.modules, {"pystray": None}):
             sys.modules.pop("tray_loop", None)
-            self.assertIsNone(app._start_tray("http://x", mock.Mock()))
+            self.assertIsNone(app._start_tray("http://x", mock.Mock(), FakeButton(), FakeServer()))
+
+    def test_windows_shutdown_is_allowed_and_turns_the_led_off(self):
+        quit_, ended = [], []
+        icon = self.tray_loop.start(lambda: None, lambda: quit_.append(1), lambda: ended.append(1))
+        handle = icon._message_handlers
+        # pystray answers 0 to unknown messages; 0 here would veto shutdown.
+        self.assertEqual(handle[self.tray_loop.WM_QUERYENDSESSION](0, 0), 1)
+        handle[self.tray_loop.WM_ENDSESSION](0, 0)  # shutdown was cancelled
+        self.assertEqual(ended, [])
+        handle[self.tray_loop.WM_ENDSESSION](1, 0)
+        self.assertEqual(ended, [1])
+        handle[self.tray_loop.WM_CLOSE](0, 0)  # plain `taskkill`
+        self.assertEqual(quit_, [1])
+
+    def test_session_end_cleans_up_before_returning(self):
+        button, server = FakeButton(), mock.Mock()
+        app.LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        app.LOCK_PATH.write_text(str(app.os.getpid()))
+        with mock.patch.object(app, "_resources_released", False):
+            icon = app._start_tray("http://x", mock.Mock(), button, server)
+            icon._message_handlers[self.tray_loop.WM_ENDSESSION](1, 0)
+            self.assertEqual(button.colors, ["off"])
+            self.assertFalse(app.LOCK_PATH.exists())
+            server.shutdown.assert_called_once()
 
 
 class WindowsRelaunchTests(unittest.TestCase):
