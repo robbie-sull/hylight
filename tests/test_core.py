@@ -247,6 +247,36 @@ class WebFlowTests(unittest.TestCase):
         self.assertTrue(self.controller.consume_restart_requested())
         self.assertFalse(self.controller.consume_restart_requested())
 
+    def test_quit_page_hides_restart_before_the_server_goes(self):
+        self.login()
+        page = self.client.post("/quit").data.decode()
+        self.controller._pending_quit_timer.cancel()
+        self.assertIn("HyLight has quit", page)
+        self.assertIn("}, %d);" % ((web_ui.QUIT_GRACE_SECONDS - 1) * 1000), page)
+
+
+class LedButtonCloseTests(unittest.TestCase):
+    """Seen on Windows: after shutdown closed the device, the button thread's
+    next read failed, the self-healing reopened it ("LED button connected")
+    and flagged a repaint of the LED shutdown had just turned off."""
+
+    def test_close_is_final(self):
+        with mock.patch.object(app.hid, "enumerate", return_value=[]):
+            button = app.LedButton()
+        device = mock.Mock()
+        device.read.side_effect = OSError("read error")
+        button.device, button.connected = device, True
+        button.close()
+        device.close.assert_called_once()
+        button._last_reopen_attempt = 0.0
+        with mock.patch.object(button, "_open") as reopen:
+            self.assertIsNone(button.read_button_state())
+            button.set_color("red")
+            button._reopen()
+        reopen.assert_not_called()
+        self.assertFalse(button.connected)
+        self.assertFalse(button.consume_needs_refresh())
+
 
 class LedWriteTests(unittest.TestCase):
     """Windows rejects the feature report (the descriptor declares none), so

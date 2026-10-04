@@ -525,9 +525,19 @@ SETTINGS_PAGE = BRAND_HEAD + """
 QUIT_PAGE = BRAND_HEAD + """
 <div class="success">HyLight is shutting down. The LED will turn off shortly.
 You can close this tab -- reopen the app whenever you want to use it again.</div>
-<form method="post" action="{{ url_for('restart_app') }}">
+<form id="restart-form" method="post" action="{{ url_for('restart_app') }}">
   <button type="submit" class="btn-primary">Restart HyLight instead</button>
 </form>
+<p id="quit-done" hidden>HyLight has quit. To use it again, open the HyLight app.</p>
+<script>
+// The server only stays up for a few seconds after Quit; a Restart click
+// after that would land on the browser's "can't reach this page" error.
+// Take the button away a moment before the server goes.
+setTimeout(function () {
+  document.getElementById("restart-form").hidden = true;
+  document.getElementById("quit-done").hidden = false;
+}, {{ button_ms }});
+</script>
 """ + BRAND_FOOT
 
 RESTART_PAGE = BRAND_HEAD + """
@@ -659,7 +669,7 @@ def create_app(cfg, controller):
     @app.route("/quit", methods=["POST"])
     def quit_app():
         controller.request_shutdown(delay_seconds=QUIT_GRACE_SECONDS)
-        return render_template_string(QUIT_PAGE)
+        return render_template_string(QUIT_PAGE, button_ms=(QUIT_GRACE_SECONDS - 1) * 1000)
 
     @app.route("/restart", methods=["POST"])
     def restart_app():

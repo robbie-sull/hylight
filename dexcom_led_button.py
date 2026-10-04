@@ -332,6 +332,7 @@ class LedButton:
         self.connected = False
         self._last_reopen_attempt = 0.0
         self._needs_refresh = False
+        self._closed = False
         self._reopen()
         if not self.connected:
             log.warning(
@@ -358,6 +359,8 @@ class LedButton:
         self.device = d
 
     def _ensure_open(self):
+        if self._closed:
+            return False
         if not self.connected:
             self._reopen()
         return self.connected
@@ -397,6 +400,8 @@ class LedButton:
         return None
 
     def _handle_io_failure(self, what):
+        if self._closed:
+            return
         if self.connected:
             log.warning("%s failed -- button disconnected (unplugged?)", what)
         self.connected = False
@@ -407,6 +412,8 @@ class LedButton:
         initial connect and for reconnecting after a disconnect - in
         both cases self.device may already be None or stale."""
         with self.lock:
+            if self._closed:
+                return
             now = time.monotonic()
             if now - self._last_reopen_attempt < self.REOPEN_RETRY_SECONDS:
                 return
@@ -447,11 +454,18 @@ class LedButton:
         return False
 
     def close(self):
-        try:
-            if self.device is not None:
-                self.device.close()
-        except Exception:
-            pass
+        """Final close at shutdown. Stops the self-healing too: otherwise
+        the button thread's next read fails on the closed handle, reopens
+        the device and repaints the LED that shutdown just turned off."""
+        with self.lock:
+            self._closed = True
+            self.connected = False
+            try:
+                if self.device is not None:
+                    self.device.close()
+            except Exception:
+                pass
+            self.device = None
 
 
 # --------------------------------------------------------------------------
