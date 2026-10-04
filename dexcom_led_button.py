@@ -210,6 +210,11 @@ from pydexcom import Dexcom
 from config import Config, CONFIG_DIR
 
 KEYCHAIN_SERVICE = "dexcom_led_button"
+# What the OS calls the place keyring stores the login, for log messages.
+CREDENTIAL_STORE = {
+    "darwin": "macOS Keychain",
+    "win32": "Windows Credential Manager",
+}.get(sys.platform, "the system keyring")
 
 # pydexcom's requests calls carry no timeout, so a Dexcom Share server
 # that stalls (no response, no error -- confirmed happening in practice)
@@ -270,10 +275,13 @@ COLORS = {
     "white": (0x01, 0xFF, 0xFF, 0xFF),    # R + G + B
 }
 
+# A windowed Windows exe has no console: sys.stderr is None there, so only
+# log to the console when there is one (the log file below always works).
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s.%(msecs)03d  %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler()] if sys.stderr is not None else [],
 )
 log = logging.getLogger("led-button")
 
@@ -284,8 +292,10 @@ try:
     from logging.handlers import RotatingFileHandler
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # UTF-8 explicitly: Windows would otherwise use its legacy code page and
+    # silently drop any line with characters outside it.
     _file_handler = RotatingFileHandler(
-        CONFIG_DIR / "hylight.log", maxBytes=1_000_000, backupCount=2
+        CONFIG_DIR / "hylight.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"
     )
     _file_handler.setFormatter(
         logging.Formatter("%(asctime)s.%(msecs)03d  %(message)s", "%Y-%m-%d %H:%M:%S")
@@ -329,6 +339,7 @@ class LedButton:
         self.connected = False
         self._last_reopen_attempt = 0.0
         self._needs_refresh = False
+        self._closed = False
         self._reopen()
         if not self.connected:
             log.warning(
@@ -355,6 +366,8 @@ class LedButton:
         self.device = d
 
     def _ensure_open(self):
+        if self._closed:
+            return False
         if not self.connected:
             self._reopen()
         return self.connected
@@ -394,6 +407,8 @@ class LedButton:
         return None
 
     def _handle_io_failure(self, what):
+        if self._closed:
+            return
         if self.connected:
             log.warning("%s failed -- button disconnected (unplugged?)", what)
         self.connected = False
@@ -404,6 +419,8 @@ class LedButton:
         initial connect and for reconnecting after a disconnect - in
         both cases self.device may already be None or stale."""
         with self.lock:
+            if self._closed:
+                return
             now = time.monotonic()
             if now - self._last_reopen_attempt < self.REOPEN_RETRY_SECONDS:
                 return
@@ -444,11 +461,18 @@ class LedButton:
         return False
 
     def close(self):
-        try:
-            if self.device is not None:
-                self.device.close()
-        except Exception:
-            pass
+        """Final close at shutdown. Stops the self-healing too: otherwise
+        the button thread's next read fails on the closed handle, reopens
+        the device and repaints the LED that shutdown just turned off."""
+        with self.lock:
+            self._closed = True
+            self.connected = False
+            try:
+                if self.device is not None:
+                    self.device.close()
+            except Exception:
+                pass
+            self.device = None
 
 
 # --------------------------------------------------------------------------
@@ -848,7 +872,7 @@ def _get_keyring():
         return keyring
     except ImportError:
         log.info("`keyring` not installed - credentials won't be saved to "
-                  "Keychain. Run: pip3 install keyring")
+                  "%s. Run: pip3 install keyring", CREDENTIAL_STORE)
         return None
 
 
@@ -891,7 +915,7 @@ def save_credentials_to_keychain(username, password):
     if keyring is not None:
         keyring.set_password(KEYCHAIN_SERVICE, "username", username)
         keyring.set_password(KEYCHAIN_SERVICE, "password", password)
-        log.info("Saved credentials to macOS Keychain for next time.")
+        log.info("Saved credentials to %s for next time.", CREDENTIAL_STORE)
 
 
 def clear_saved_credentials():
@@ -1139,7 +1163,8 @@ def _shutdown_resources(button=None, server=None):
     native macOS event loop there are two ways to reach it: main()'s
     finally block (Quit/Restart buttons, SIGTERM) and the loop's own
     terminate handler (Dock > Quit, Cmd+Q, logout), which exits the
-    process without ever unwinding back into main()."""
+    process without ever unwinding back into main(). Likewise the Windows
+    tray's end-of-session handler."""
     global _resources_released
     with _resources_lock:
         if _resources_released:
@@ -1197,7 +1222,7 @@ def _relaunch_app():
     )
 
 
-def _start_tray(url, controller):
+def _start_tray(url, controller, button, server):
     """Windows: shows the tray icon (Open settings / Quit). Returns the
     icon, or None if the tray couldn't be started -- the app still runs,
     reachable through its settings page."""
@@ -1209,10 +1234,21 @@ def _start_tray(url, controller):
             webbrowser.open(url)
 
         def _on_quit():
-            log.info("Quit requested from the tray icon")
+            log.info("Quit requested from the tray icon (or taskkill)")
             controller.request_shutdown()
 
-        return tray_loop.start(_on_open, _on_quit)
+        def _on_session_end():
+            # Windows ends the process as soon as this returns, without
+            # unwinding into main()'s finally -- clean up right here.
+            # LED off and lock released first, on this thread: if main()'s
+            # finally got there first, this call would return immediately
+            # and Windows could end the process mid-cleanup. The OS frees
+            # the port when the process ends.
+            log.info("Windows is shutting down or logging off -- turning the LED off")
+            _shutdown_resources(button, None)
+            _stop_web_server(server)
+
+        return tray_loop.start(_on_open, _on_quit, _on_session_end)
     except Exception:
         log.warning("Couldn't show the tray icon -- the settings page still works.", exc_info=True)
         return None
@@ -1260,11 +1296,13 @@ def main():
         # page instead of just refusing.
         url = f"http://127.0.0.1:{WEB_UI_PORT}"
         webbrowser.open(url)
-        sys.exit(
+        message = (
             f"dexcom_led_button is already running (process {existing_pid}) -- "
             f"reopened its settings page at {url} instead of starting a "
             "second copy (only one copy can use the LED button at a time)."
         )
+        log.info(message)
+        sys.exit(message)
 
     controller = None
     button = None
@@ -1286,8 +1324,8 @@ def main():
             except Exception:
                 log.warning(
                     "Login failed using saved/environment credentials. "
-                    "Clearing any saved Keychain entry -- reconnect via "
-                    "the settings page."
+                    "Clearing the saved login in %s -- reconnect via "
+                    "the settings page.", CREDENTIAL_STORE
                 )
                 clear_saved_credentials()
 
@@ -1298,11 +1336,14 @@ def main():
         try:
             server = make_server("127.0.0.1", WEB_UI_PORT, app)
         except OSError:
-            sys.exit(
+            # Logged as well: a windowed app has no console for sys.exit's text.
+            message = (
                 f"Could not start the settings web server on port {WEB_UI_PORT} "
-                "-- something else on this Mac is already using it. If another "
+                "-- something else on this computer is already using it. If another "
                 "copy of this app is somehow still running, quit it first."
             )
+            log.error(message)
+            sys.exit(message)
         # Exposed so the settings page's Quit button can stop the
         # server gracefully (see MonitorController.request_shutdown)
         # -- once serve_forever() returns below, the finally block
@@ -1345,7 +1386,7 @@ def main():
             native_loop.run(server.serve_forever, _on_native_terminate, _on_native_reopen)
         else:
             if sys.platform == "win32":
-                tray_icon = _start_tray(url, controller)
+                tray_icon = _start_tray(url, controller, button, server)
             server.serve_forever()
     except KeyboardInterrupt:
         pass

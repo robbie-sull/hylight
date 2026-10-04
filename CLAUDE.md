@@ -16,9 +16,12 @@ reports what they see by eye; Claude cannot see the LED.
 | `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work. |
 | `tray_loop.py` | **Windows only** (pystray + Pillow). Tray icon: "Open HyLight Settings" (also left-click) and "Quit HyLight". Runs on its own thread; `main()` keeps `serve_forever()` and stops the icon in its `finally`. |
 | `HyLight.spec` | **macOS** PyInstaller spec -> `HyLight.app`. |
+| `HyLight_win.spec` | **Windows** PyInstaller spec -> `dist/HyLight/HyLight.exe` (onedir, no console, Credential Manager + pystray backends, version info). Only builds on Windows. |
+| `build_windows.bat` | Windows build via `uv` (Python 3.13): runs the spec, then zips `dist/HyLight` + the Windows guide into `dist/HyLight-Windows-<ver>.zip`. |
 | `tests/test_core.py` | Platform-independent tests, all against fakes. `python3 -m unittest discover -s tests -v` |
-| `assets/` | `HyLight.icns` (mac), `HyLight_icon_1024.png` (source art for a Windows `.ico`; has macOS-style padding), header logo files. |
+| `assets/` | `HyLight.icns` (mac), `HyLight.ico` (Windows; padding trimmed, 16-256 px), `HyLight_icon_1024.png` (source art, also the tray icon), header logo files. |
 | `pilot_release/Read Me First.txt` | Tester guide that ships in the Mac zips. Keep it in sync with behavior. |
+| `pilot_release/Read Me First (Windows).txt` | Windows tester guide (shipped as `Read Me First.txt` in the Windows zip). Keep in sync too. |
 
 ## Behavior (see module docstring for full detail)
 
@@ -41,15 +44,19 @@ reports what they see by eye; Claude cannot see the LED.
 USB HID, vendor `0xD209`, product `0x1200`. The device exposes several interfaces; **LED control and
 button reads both use `interface_number == 0`**.
 
-- **LED write:** `device.send_feature_report([0x00, enable, R, G, B])`, `enable` must be `1`
-  (`enable=0` is silently ignored, even for "off"). "Off" = enable 1, RGB 0.
+- **LED write:** `device.send_feature_report([0x00, enable, R, G, B])` on macOS; on **Windows the
+  same 5 bytes go through `device.write(...)`** (Output report) -- `send_feature_report` fails
+  there with "Incorrect function" (Windows reports FeatureReportByteLength=0). Probed on Win 10.
+  `enable` must be `1` (`enable=0` is silently ignored, even for "off"). "Off" = enable 1, RGB 0.
 - **Each of R, G, B is a plain on/off switch, not a brightness.** Any nonzero value = full on. So
   only 7 colors exist: red, green, blue, yellow (R+G), purple (R+B), cyan (G+B), white (R+G+B).
   `COLORS` uses 0xFF for every channel that is on. (Cyan is the one unused color.)
 - **Button read:** `device.read(64)` returns `[0x01,0,0,0]` while pressed. There is **no "released"
   report** -- it just stops sending; release is inferred from silence (`RELEASE_TIMEOUT`).
 - The HID report descriptor declares **no Feature report** (only Input and a 4-byte Output). The
-  Feature-report write works on macOS anyway; see the Windows risks below.
+  Feature-report write works on macOS anyway (lenient IOKit); Windows enforces it, hence `write()`.
+  On Windows, interface 0 is one HID collection (usage page 0x0001, In/Out 5 bytes); interface 1
+  splits into three keyboard/consumer collections we don't use.
 - Unfixable hardware behavior: a faint red glow remains at "off"; holding the button shows a
   built-in purple/magenta regardless of what we set (same color as the PURPLE alert); LED writes
   are unreliable while the button is held down, so previews are shown after release.
@@ -78,6 +85,11 @@ button reads both use `interface_number == 0`**.
 **Goal:** feature parity with the Mac app (same web UI, same behavior), shipped as a double-click
 Windows app (PyInstaller `--onedir`, no console, `.ico` made from `assets/HyLight_icon_1024.png`),
 from the same codebase. Keep shared logic shared; isolate platform code.
+
+**Status: steps 1-6 done and verified by the owner on real hardware (Windows 10)** -- LED colors,
+button gestures, tray, restart (source + packaged exe), taskkill, sign-out, build via
+`build_windows.bat`, paths with spaces/accents. Remaining: code signing (paid, later). The plan
+below is kept for the record.
 
 **Do these in order, and stop to report after step 1:**
 

@@ -1,0 +1,108 @@
+HYLIGHT PILOT FOR WINDOWS  -  v0.4.0                    Danko Panko's HyLight
+==========================================================================
+
+HyLight turns your HyLight button into a glucose light. It reads your Dexcom
+numbers and glows a color when something needs your attention.
+
+IMPORTANT: This is a pilot of a convenience light. It is NOT a medical device.
+Keep using your Dexcom app and its alarms exactly as you do today.
+
+
+WHAT YOU NEED
+-------------
+ - A PC running Windows 10 or 11, and your HyLight button
+ - A Dexcom CGM with Dexcom Share turned on (Dexcom app > Settings > Share,
+   with at least one follower added)
+ - The Dexcom login of the person WEARING the sensor. Do not use a
+   follower's account - it will log in but show no readings.
+
+
+SET UP (about 5 minutes)
+------------------------
+1. Right-click the zip and choose "Extract All...", then Extract. Don't run
+   HyLight from inside the zip - it won't work from there.
+   Move the extracted "HyLight" folder somewhere it can stay, for example
+   your Documents folder. Keep everything in that folder together.
+
+2. Plug in the button.
+
+3. Open the HyLight folder and double-click HyLight.exe. The first time,
+   Windows will say "Windows protected your PC", because HyLight isn't
+   signed by a big publisher yet. This is expected. To open it:
+     click "More info", then "Run anyway".
+   If your antivirus blocks or removes HyLight, that is a false alarm
+   common to new apps; restore it from your antivirus's quarantine or
+   allow it, then extract the zip again.
+
+4. Your browser opens HyLight's settings page. Sign in with the Dexcom login
+   of the person wearing the sensor, pick your region, and click Connect.
+   Your login is stored safely in Windows Credential Manager.
+
+5. The status line at the top of the page should say
+   "Button connected - showing ... BG ...". You're set.
+
+TIP: HyLight runs in the background with a small red sun icon next to the
+clock (it may be hidden under the ^ arrow - you can drag it out onto the
+taskbar). Click the sun to bring the settings page back, or double-click
+HyLight.exe again. The page lives at http://127.0.0.1:8765 if you'd like a
+bookmark.
+
+TIP: For a desktop shortcut, right-click HyLight.exe > Send to > Desktop
+(create shortcut). On Windows 11, click "Show more options" first.
+
+
+USING THE BUTTON
+----------------
+ Colors   GREEN  = in range (only shown when you tap the button)
+          WHITE  = glucose is ramping up
+          YELLOW = high: above your yellow threshold
+          RED    = very high: above your red threshold
+          PURPLE = low: below 70
+          BLUE   = your reminder timer finished
+ Tap          Shows your current status for 3 seconds, any time of day.
+ Press & hold Mutes the current alert for a while. Hold again to un-mute.
+ Double tap   Starts a reminder timer (default 20 minutes). The button
+              flashes blue to confirm, then glows blue when time is up.
+
+Automatic lights only happen inside your "active window" (default 11:30 AM -
+8:00 PM). Change the window, thresholds, mute length and reminder time on
+the settings page.
+
+
+QUITTING AND RESTARTING
+-----------------------
+Quit with "Quit HyLight" at the bottom of the settings page, or right-click
+the sun icon by the clock and choose "Quit HyLight". Either turns the light
+off. The goodbye page after "Quit HyLight" has a "Restart HyLight instead"
+button if you meant to restart it.
+Shutting down or signing out of Windows also turns the light off.
+If HyLight is ever ended from Task Manager, the button can stay lit. Just
+open HyLight again and quit it normally.
+To stop using HyLight: click "Disconnect Dexcom account" on the settings
+page, quit, then delete the HyLight folder.
+
+
+IF SOMETHING LOOKS WRONG
+------------------------
+ "Button not detected": unplug and replug the button. Only one program can
+    use the button at a time, so close anything else that might be using it.
+ No light when you expect one: look at the status line at the top of the
+    page. It shows the BG HyLight sees and what it is showing. Remember
+    automatic lights only appear inside the active window.
+ No BG number at all: Share is probably off, or you signed in with a
+    follower's account. Disconnect, then sign in again with the wearer's.
+
+
+FEEDBACK
+--------
+Please tell me about anything confusing, wrong, or annoying - including
+whether the colors and timing feel right in real life. If something breaks,
+send me this log file. To find it, press Windows key + R, paste this, and
+press Enter:
+    %USERPROFILE%\.dexcom_led_button
+The file is hylight.log. It records your glucose readings and Dexcom
+username, but never your password. Share it only if you are comfortable
+doing so.
+
+Privacy: HyLight only talks to Dexcom's servers and to your own PC. Your
+Dexcom login is kept in Windows Credential Manager.
