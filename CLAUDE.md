@@ -27,17 +27,24 @@ reports what they see by eye; Claude cannot see the LED.
 
 - **Colors.** PURPLE = below 70 (fixed `LOW_THRESHOLD`). WHITE = ramping up. YELLOW = above the
   "yellow" threshold (default 150). RED = above the red threshold (default 200). GREEN = in range,
-  **only ever shown by a short-press preview, never automatically**. BLUE = reminder timer done.
+  **only ever shown by a short-press preview, never automatically**. BLUE = only ever two quick
+  flashes, when an on-call window starts or ends (never a steady light).
   Priority: purple > red > yellow > white. Automatic lights only happen inside the active window
   (default 11:30-20:00); a short press shows status for 3 s at any time.
-- **Gestures.** Short tap: 3 s status preview. Long press (>=0.6 s): mute all alerts for the mute
-  duration (default 30 min); long press again while muted cancels the mute; long press on blue
-  dismisses the reminder. Double tap: starts a reminder timer (default 20 min), double-blue-flash
-  confirmation, then solid blue.
-- **Settings** (web page): active days/window, yellow & red thresholds, ramp rise size (mg/dL over
-  ~15 min), mute duration, reminder delay. Saved immediately and the glucose loop is woken.
-- Ramp detection needs the Dexcom trend arrow OR a rise >= the configured amount, confirmed over
-  2 consecutive real samples (`RAMP_CONFIRM_CYCLES`).
+- **Gestures.** Short tap: 3 s status preview. Long press (>=0.6 s): mute all alerts for 30 min
+  (fixed `MUTE_DURATION`, not a setting); long press again while muted cancels the mute. Double tap: starts an
+  **on-call window** (default 60 min) -- the button behaves as if inside the active window even
+  off-schedule (`in_window()` = schedule OR on-call; `in_scheduled_window()` is the schedule alone).
+  Double blue flash to confirm; another double blue flash when it ends, skipped if the regular
+  window has taken over by then. Double tap again restarts the full length. (This replaced an
+  earlier "reminder timer" double-tap feature.)
+- **Settings** (web page): active days/window, yellow & red thresholds, ramp sensitivity, on-call
+  length. Saved immediately and the glucose loop is woken.
+- Ramp detection needs the Dexcom trend arrow OR a rise over ~15 min of at least the sensitivity's
+  amount (High 8 / Medium 14 / Low 20 mg/dL, `config.RAMP_SENSITIVITY_MG_DL`), confirmed over 2
+  consecutive real samples (`RAMP_CONFIRM_CYCLES`). Sensitivity "Off" disables ramp detection
+  entirely. Old configs' `ramp_magnitude_mg_dl` maps to the nearest level; `mute_duration_minutes`
+  is dropped.
 
 ## Hardware facts (hard-won -- do not re-derive)
 

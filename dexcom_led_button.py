@@ -22,8 +22,8 @@ purple (R+B), white (R+G+B), plus green and blue.
 
 Priority when more than one condition is true: PURPLE > RED > YELLOW >
 WHITE (PURPLE vs. the others is moot in practice -- a reading can't be
-both low and high at once). Outside the window, or when nothing is
-active and no reminder is due, the LED is off.
+both low and high at once). Outside the window (and any on-call window,
+see DOUBLE PRESS), or when nothing is active, the LED is off.
 
 Button gestures -- short press, long press, and double press are all
 distinct and never ambiguous with each other (see button_loop):
@@ -47,8 +47,8 @@ distinct and never ambiguous with each other (see button_loop):
   on-demand one when you ask via a press.
 
   LONG PRESS (hold for LONG_PRESS_THRESHOLD or more, then release) --
-  mutes whatever's currently lit for the configured mute duration
-  (default 30 minutes, adjustable on the settings page). Muting mutes
+  mutes whatever's currently lit for MUTE_DURATION (30 minutes, not a
+  setting). Muting mutes
   ALL of purple/red/yellow/white together, not just whichever one was showing,
   since e.g. muting red but leaving yellow/white active meant the
   light would just come back on a minute later at a lower tier even
@@ -56,21 +56,19 @@ distinct and never ambiguous with each other (see button_loop):
   already muted (light is off because of the mute, not because
   nothing's active) cancels the mute early and immediately shows the
   true current status (never green -- this restores the real automatic
-  status, not a preview). A long press while the blue reminder is lit
-  dismisses it. Otherwise (nothing lit, nothing muted) a long press
-  does nothing.
+  status, not a preview). Otherwise (nothing lit, nothing muted) a long
+  press does nothing.
 
-  DOUBLE PRESS (two short taps close together, works any time of day,
-  independent of the window above) -- after the configured reminder
-  delay (default 20 minutes, adjustable on the settings page), LED
-  turns blue as a reminder to check your glucose. Double-pressing again
-  resets/restarts the countdown. A double press also blinks the LED
-  blue twice immediately, as confirmation that the delay was
-  (re)started.
-
-If a glucose alert (purple/red/yellow/white) needs to display at the same
-moment the blue reminder is due, the glucose alert wins -- the
-reminder just waits and will show once the alert is muted or clears.
+  DOUBLE PRESS (two short taps close together, works any time of day)
+  -- starts a temporary "on-call" window: for the configured length
+  (default 1 hour, adjustable on the settings page) the button behaves
+  exactly as if it were inside the active window, e.g. for a work
+  session after the kids are in bed. The LED blinks blue twice to
+  confirm. When the on-call window ends it blinks blue twice again to
+  say it's going back to the normal schedule -- unless the regular
+  window has already taken over by then, since nothing changes in that
+  case. Double-pressing again during an on-call window restarts it for
+  a full length from that moment.
 
 Unplugging/replugging the button (e.g. undocking a laptop to travel
 and redocking later, while the button stays on the desk) is a routine
@@ -93,16 +91,16 @@ on two independent signals and requires both to agree, confirmed
 across two real (not just polled) Dexcom samples ~5-10 minutes apart:
 
   1. Dexcom's own trend arrow is SingleUp, FortyFiveUp, or DoubleUp.
-  2. A rise of >= the configured rise threshold (default 15 mg/dL) over
-     roughly the last 15 minutes, as a backup for whenever the trend
-     arrow is briefly unavailable.
+  2. A rise of at least the sensitivity's amount over roughly the last
+     15 minutes (High 8, Medium 14 -- the default -- or Low 20 mg/dL), as
+     a backup for whenever the trend arrow is briefly unavailable.
 
 Either signal counts, but it must hold for RAMP_CONFIRM_CYCLES (2)
 consecutive real samples before the white light fires, so a single
 noisy or backfilled reading can't flip the light on its own -- this is
-hardcoded for now, not exposed in settings. If it's still too twitchy
-or too slow after a few days of real use, the rise threshold is
-adjustable on the settings page under "Ramp Detection".
+hardcoded for now, not exposed in settings. Too twitchy or too slow?
+Change the sensitivity on the settings page under "Ramp Detection";
+"Off" turns ramp detection off entirely (neither signal is checked).
 
 LED hardware notes
 -------------------
@@ -185,7 +183,7 @@ web_ui.py contains a small local-only (127.0.0.1) Flask app that:
   - Shows a Dexcom Share login form until credentials are connected,
     then starts monitoring automatically on a successful login.
   - Shows a settings form (active days, window start/end, yellow/red
-    thresholds, and the ramp-detection knobs) once connected.
+    thresholds, ramp sensitivity and on-call length) once connected.
 All settings are persisted via config.py to
 ~/.dexcom_led_button/config.json. Dexcom credentials are never written
 there -- they only ever live in the OS keychain via `keyring`.
@@ -201,7 +199,7 @@ import getpass
 import threading
 import webbrowser
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import hid
@@ -230,7 +228,7 @@ socket.setdefaulttimeout(15)
 # --------------------------------------------------------------------------
 #
 # The active window (days/start/end), YELLOW/RED thresholds, and the
-# ramp-detection knobs are all user-configurable now -- see
+# ramp sensitivity are all user-configurable now -- see
 # config.py and web_ui.py. What's left here are the things a customer
 # never needs to touch: hardware IDs, internal timings, and colors.
 
@@ -248,6 +246,7 @@ RISING_TRENDS = {"SingleUp", "DoubleUp", "FortyFiveUp"}
 RAMP_CONFIRM_CYCLES = 2             # consecutive real samples required to
                                      # confirm a ramp; hardcoded for now
                                      # (not exposed in settings)
+MUTE_DURATION = timedelta(minutes=30)  # how long a long press mutes alerts
 LOW_THRESHOLD = 70                  # current glucose below this -> PURPLE;
                                      # a fixed clinical low, not exposed in
                                      # settings (like RAMP_CONFIRM_CYCLES)
@@ -484,8 +483,7 @@ class State:
     def __init__(self):
         self.lock = threading.Lock()
         self.mute_until = None        # None = not muted; else muted until this datetime
-        self.reminder_due_at = None   # when the blue light should turn on
-        self.reminder_lit = False     # is blue currently on?
+        self.on_call_until = None     # end of a double-press on-call window, if one is running
         self.currently_lit = "off"    # what color is actually displayed right now
         self.latest_value = None      # most recent glucose value seen (any time of day)
         self.latest_ramp_confirmed = False
@@ -535,32 +533,29 @@ class State:
         with self.lock:
             return self.latest_value, self.latest_ramp_confirmed
 
-    # -- reminder -------------------------------------------------------
-    def arm_reminder(self, now, delay):
+    # -- on-call window (double press) ----------------------------------
+    def start_on_call(self, now, duration):
         with self.lock:
-            self.reminder_due_at = now + delay
-            self.reminder_lit = False
-        log.info("Post-meal reminder armed for %s", self.reminder_due_at.strftime("%H:%M:%S"))
+            self.on_call_until = now + duration
+        log.info("On-call window started -- active until %s", self.on_call_until.strftime("%H:%M:%S"))
 
-    def dismiss_reminder(self):
+    def is_on_call(self, now):
         with self.lock:
-            self.reminder_due_at = None
-            self.reminder_lit = False
-        log.info("Reminder dismissed")
+            until = self.on_call_until
+        return until is not None and now < until
 
-    def check_reminder_due(self, now):
+    def get_on_call_until(self):
         with self.lock:
-            if (
-                self.reminder_due_at is not None
-                and not self.reminder_lit
-                and now >= self.reminder_due_at
-            ):
-                self.reminder_lit = True
-        return self.reminder_lit
+            return self.on_call_until
 
-    def reminder_is_lit(self):
+    def consume_on_call_expiry(self, now):
+        """True exactly once: the first call after the on-call window ran out."""
         with self.lock:
-            return self.reminder_lit
+            if self.on_call_until is None or now < self.on_call_until:
+                return False
+            self.on_call_until = None
+        log.info("On-call window ended")
+        return True
 
     # -- ramp streak, tied to real Dexcom samples, not poll count --------
     def bump_ramp_streak_if_new(self, reading_dt, rising):
@@ -574,6 +569,13 @@ class State:
                 self._ramp_streak = 0
             return self._ramp_streak
 
+    def reset_ramp_streak(self):
+        # So turning ramp detection back on starts counting from scratch
+        # instead of trusting a streak from before it was switched off.
+        with self.lock:
+            self._ramp_streak = 0
+            self._last_ramp_dt = None
+
 
 state = State()
 
@@ -583,15 +585,26 @@ state = State()
 # --------------------------------------------------------------------------
 
 
-def in_window(now, cfg):
+def in_scheduled_window(now, cfg):
     return (
         now.weekday() in cfg.get_active_days()
         and cfg.get_window_start() <= now.time() <= cfg.get_window_end()
     )
 
 
+def in_window(now, cfg):
+    """The regular schedule, or a temporary on-call window started by a
+    double press -- everything that asks "should the button be active
+    right now?" goes through here."""
+    return in_scheduled_window(now, cfg) or state.is_on_call(now)
+
+
 def detect_ramp(dexcom, cfg):
     """Returns True once a rise has been confirmed across two real samples."""
+    magnitude = cfg.get_ramp_magnitude()
+    if magnitude is None:  # sensitivity "off"
+        state.reset_ramp_streak()
+        return False
     try:
         readings = dexcom.get_glucose_readings(minutes=20, max_count=4)
     except Exception:
@@ -606,7 +619,7 @@ def detect_ramp(dexcom, cfg):
 
     magnitude_rising = False
     if len(readings) >= 3:
-        magnitude_rising = (latest.value - readings[2].value) >= cfg.get_ramp_magnitude()
+        magnitude_rising = (latest.value - readings[2].value) >= magnitude
 
     rising_now = trend_rising or magnitude_rising
     streak = state.bump_ramp_streak_if_new(latest.datetime, rising_now)
@@ -650,20 +663,31 @@ def _sleep_or_wake(wake_event, seconds):
         wake_event.clear()
 
 
+def _poll_wait_seconds(now):
+    """Normally POLL_INTERVAL_SECONDS, but wakes up as an on-call window
+    ends so its goodbye flash lands on time instead of up to a minute
+    late. The small cushion keeps a wall-clock wobble from waking a hair
+    early and spinning through extra Dexcom requests."""
+    until = state.get_on_call_until()
+    if until is None:
+        return POLL_INTERVAL_SECONDS
+    return min(POLL_INTERVAL_SECONDS, max(0.0, (until - now).total_seconds()) + 0.05)
+
+
 def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
     while not stop_event.is_set():
         now = datetime.now()
+        if state.consume_on_call_expiry(now) and not in_scheduled_window(now, cfg):
+            flash_blue(button)
+
         try:
             reading = dexcom.get_current_glucose_reading()
         except Exception:
             log.exception("Failed to fetch current glucose reading")
-            _sleep_or_wake(wake_event, POLL_INTERVAL_SECONDS)
+            _sleep_or_wake(wake_event, _poll_wait_seconds(datetime.now()))
             continue
 
         value = reading.value if reading else None
-
-        # Reminder timer runs independent of the active window.
-        state.check_reminder_due(now)
 
         active_color = None
         ramp_confirmed = False
@@ -704,17 +728,11 @@ def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
             # being dead, since nothing logged in this branch before.
             log.info("No current reading returned by Dexcom Share API")
 
-        if active_color:
-            display_color = active_color
-        elif state.reminder_is_lit():
-            display_color = "blue"
-        else:
-            display_color = "off"
-
+        display_color = active_color or "off"
         button.set_color(display_color)
         state.set_currently_lit(display_color)
 
-        _sleep_or_wake(wake_event, POLL_INTERVAL_SECONDS)
+        _sleep_or_wake(wake_event, _poll_wait_seconds(datetime.now()))
 
 
 # --------------------------------------------------------------------------
@@ -724,17 +742,12 @@ def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
 
 def handle_long_press(now, button, cfg):
     """A long press mutes whatever's currently lit (all levels together,
-    see mute_all) for the configured mute duration (default 30 minutes),
-    or dismisses the blue reminder. A long press while already muted
-    cancels the mute early and immediately restores the true current
-    status."""
+    see mute_all) for MUTE_DURATION.
+    A long press while already muted cancels the mute early and
+    immediately restores the true current status."""
     lit = state.get_currently_lit()
     if lit in ("white", "yellow", "red", "purple"):
-        state.mute_all(now, cfg.get_mute_duration())
-        button.set_color("off")
-        state.set_currently_lit("off")
-    elif lit == "blue":
-        state.dismiss_reminder()
+        state.mute_all(now, MUTE_DURATION)
         button.set_color("off")
         state.set_currently_lit("off")
     elif state.is_muted(now):
@@ -751,16 +764,17 @@ def handle_long_press(now, button, cfg):
     # otherwise ("off", nothing muted), a long press does nothing
 
 
-def handle_double_press(now, button, cfg):
-    state.arm_reminder(now, cfg.get_reminder_delay())
-    flash_double_press_confirmation(button)
-    # The LED otherwise doesn't change - it lights up blue once the
-    # configured delay elapses, handled by glucose_loop's normal poll cycle.
+def handle_double_press(now, button, cfg, wake_event):
+    """Starts (or restarts) an on-call window -- see DOUBLE PRESS in the
+    module docstring. glucose_loop ends it, with a second blue flash."""
+    state.start_on_call(now, cfg.get_on_call_duration())
+    flash_blue(button)
+    wake_event.set()  # show the real status now, not at the next poll
 
 
-def flash_double_press_confirmation(button, blinks=2, on_seconds=0.15, off_seconds=0.15):
-    """Blink blue briefly to confirm the reminder delay was (re)started,
-    then restore whatever color is actually supposed to be showing."""
+def flash_blue(button, blinks=2, on_seconds=0.15, off_seconds=0.15):
+    """Blink blue twice -- confirms an on-call window starting (double
+    press) or ending -- then restore whatever is supposed to be showing."""
     restore_color = state.get_currently_lit()
     for _ in range(blinks):
         button.set_color("blue")
@@ -770,7 +784,7 @@ def flash_double_press_confirmation(button, blinks=2, on_seconds=0.15, off_secon
     button.set_color(restore_color)
 
 
-def button_loop(button, cfg):
+def button_loop(button, cfg, wake_event):
     is_down = False
     press_down_time = 0.0      # monotonic time of the current press's down edge
     last_pressed_seen = 0.0    # monotonic time of the most recent "pressed" report
@@ -827,7 +841,7 @@ def button_loop(button, cfg):
                 ):
                     pending_short_tap = None
                     log.info("Double press detected")
-                    handle_double_press(now, button, cfg)
+                    handle_double_press(now, button, cfg, wake_event)
                 else:
                     pending_short_tap = now_monotonic
 
@@ -837,9 +851,8 @@ def button_loop(button, cfg):
             and now_monotonic >= preview_off_at
         ):
             # Revert to whatever the automatic logic actually has showing
-            # right now -- off/blue outside the window (as before), but
-            # also purple/red/yellow/white if the preview interrupted that
-            # during the active window.
+            # right now -- off outside the window, or purple/red/yellow/
+            # white if the preview interrupted that during the window.
             button.set_color(state.get_currently_lit())
             preview_off_at = None
 
@@ -968,6 +981,7 @@ class MonitorController:
         now = datetime.now()
         latest_value, latest_ramp_confirmed = state.get_latest_reading()
         mute_until = state.get_mute_until()
+        on_call_until = state.get_on_call_until() if state.is_on_call(now) else None
         return {
             "button_connected": self.button.connected,
             "monitoring": monitoring,
@@ -980,6 +994,7 @@ class MonitorController:
             "red_threshold": self.cfg.get_red_threshold(),
             "muted": state.is_muted(now),
             "muted_until": mute_until.isoformat(timespec="seconds") if mute_until else None,
+            "on_call_until": on_call_until.isoformat(timespec="seconds") if on_call_until else None,
         }
 
     def notify_settings_changed(self):
@@ -1048,7 +1063,7 @@ class MonitorController:
                 daemon=True,
             ).start()
             threading.Thread(
-                target=button_loop, args=(self.button, self.cfg), daemon=True
+                target=button_loop, args=(self.button, self.cfg, self._settings_changed), daemon=True
             ).start()
             self._running = True
             log.info("Monitoring started for %s", username)

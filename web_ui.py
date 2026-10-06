@@ -5,7 +5,7 @@ Two states:
     it validates the credentials against Dexcom, saves them to the
     Keychain, and starts monitoring.
   - Connected: "/" shows the settings form (active window, days,
-    thresholds, mute duration). Saving persists to config.py's Config
+    thresholds, ramp sensitivity, on-call length). Saving persists to config.py's Config
     and takes effect on the next glucose poll / next press.
 
 Kept dependency-free beyond Flask itself (no template files, no
@@ -23,7 +23,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
-from config import DAY_NAMES, MUTE_DURATION_CHOICES_MINUTES, REMINDER_DELAY_CHOICES_MINUTES
+from config import DAY_NAMES, ON_CALL_DURATION_CHOICES_MINUTES, RAMP_SENSITIVITY_MG_DL
 
 # The real logo artwork (wordmark + sun), background-removed and
 # base64-inlined so the rendered page stays a single dependency-free
@@ -331,6 +331,9 @@ BRAND_FOOT = """
         if (data.muted) {
           parts.push("muted until " + fmtTime(data.muted_until));
         }
+        if (data.on_call_until) {
+          parts.push("on-call until " + fmtTime(data.on_call_until));
+        }
         text.textContent = "Button connected — " + parts.join(" · ");
       })
       .catch(function () {
@@ -407,20 +410,21 @@ SETTINGS_PAGE = BRAND_HEAD + """
            for 3 seconds, anytime.</p>
       </div>
     </a>
-    <a class="press-demo" href="#mute-duration">
+    <div class="press-demo">
       <div class="press-demo-btn ring-long"><div class="press-demo-led led-long"></div></div>
       <div class="press-demo-label">
         <strong>Long press</strong>
-        <p>Press and hold, then release. Mutes whatever's lit for the mute
-           duration below -- press and hold again to cancel the mute early.</p>
+        <p>Press and hold, then release. Mutes whatever's lit for 30 minutes
+           -- press and hold again to cancel the mute early.</p>
       </div>
-    </a>
-    <a class="press-demo" href="#reminder-timer">
+    </div>
+    <a class="press-demo" href="#on-call-window">
       <div class="press-demo-btn"><div class="press-demo-led led-double"></div></div>
       <div class="press-demo-label">
         <strong>Double press</strong>
-        <p>Two quick taps. Starts a reminder (default 20 min, see below) to
-           check your glucose, confirmed by a double blue flash.</p>
+        <p>Two quick taps. Turns the button on for {{ cfg.on_call_minutes | duration }} (see below),
+           even outside your active window. A double blue flash confirms it; another
+           double blue flash means time is up.</p>
       </div>
     </a>
   </div>
@@ -474,36 +478,34 @@ SETTINGS_PAGE = BRAND_HEAD + """
 
   <fieldset>
     <legend>{{ icon_ramp | safe }} Ramp Detection</legend>
-    <label for="ramp_magnitude_mg_dl">Minimum mg/dL rise over 15min to flag as ramping</label>
-    <input type="number" id="ramp_magnitude_mg_dl" name="ramp_magnitude_mg_dl"
-           value="{{ cfg.ramp_magnitude_mg_dl }}" min="1" max="200" required>
+    <label for="ramp_sensitivity">Sensitivity</label>
+    <select id="ramp_sensitivity" name="ramp_sensitivity">
+      {% for level, mg in ramp_sensitivity_choices.items() %}
+      <option value="{{ level }}" {% if level == cfg.ramp_sensitivity %}selected{% endif %}>
+        {% if mg %}{{ level | capitalize }} &mdash; {{ mg }} mg/dL rise over 15 min{% else %}Off{% endif %}
+      </option>
+      {% endfor %}
+    </select>
     <div class="hint">
-      Lower values trigger sooner but are more likely to false-alarm on noise.
+      Higher catches rises sooner but false-alarms more on noise. Dexcom's rising
+      trend arrow also counts, unless this is Off.
     </div>
   </fieldset>
 
-  <fieldset id="mute-duration">
-    <legend>Mute Duration</legend>
-    <label for="mute_duration_minutes">A long press mutes for</label>
-    <select id="mute_duration_minutes" name="mute_duration_minutes">
-      {% for minutes in mute_duration_choices %}
-      <option value="{{ minutes }}" {% if minutes == cfg.mute_duration_minutes %}selected{% endif %}>
-        {{ minutes }} minutes
+  <fieldset id="on-call-window">
+    <legend>On-Call Window</legend>
+    <label for="on_call_minutes">A double press turns the button on for</label>
+    <select id="on_call_minutes" name="on_call_minutes">
+      {% for minutes in on_call_choices %}
+      <option value="{{ minutes }}" {% if minutes == cfg.on_call_minutes %}selected{% endif %}>
+        {{ minutes | duration }}
       </option>
       {% endfor %}
     </select>
-  </fieldset>
-
-  <fieldset id="reminder-timer">
-    <legend>Reminder Timer</legend>
-    <label for="reminder_delay_minutes">A double press reminds you to check your glucose after</label>
-    <select id="reminder_delay_minutes" name="reminder_delay_minutes">
-      {% for minutes in reminder_delay_choices %}
-      <option value="{{ minutes }}" {% if minutes == cfg.reminder_delay_minutes %}selected{% endif %}>
-        {{ minutes }} minutes
-      </option>
-      {% endfor %}
-    </select>
+    <div class="hint">
+      The button works as if it were inside your active window, then flashes blue
+      twice when time is up. Double-press again to restart the timer.
+    </div>
   </fieldset>
 
   <button type="submit" class="btn-primary">Save settings</button>
@@ -562,8 +564,16 @@ setTimeout(function poll() {
 QUIT_GRACE_SECONDS = 6
 
 
+def duration_label(minutes):
+    if minutes < 60:
+        return f"{minutes} minutes"
+    hours = minutes / 60
+    return "1 hour" if hours == 1 else f"{hours:g} hours"
+
+
 def create_app(cfg, controller):
     app = Flask(__name__)
+    app.jinja_env.filters["duration"] = duration_label
 
     def render_settings(error=None, saved=False):
         return render_template_string(
@@ -571,8 +581,8 @@ def create_app(cfg, controller):
             cfg=cfg.as_dict(),
             username=controller.dexcom_username,
             enumerate_days=list(enumerate(DAY_NAMES)),
-            mute_duration_choices=MUTE_DURATION_CHOICES_MINUTES,
-            reminder_delay_choices=REMINDER_DELAY_CHOICES_MINUTES,
+            ramp_sensitivity_choices=RAMP_SENSITIVITY_MG_DL,
+            on_call_choices=ON_CALL_DURATION_CHOICES_MINUTES,
             icon_thresholds=ICON_THRESHOLDS,
             icon_ramp=ICON_RAMP,
             error=error,
@@ -627,9 +637,8 @@ def create_app(cfg, controller):
             window_end = form["window_end"]
             yellow_threshold = int(form["yellow_threshold"])
             red_threshold = int(form["red_threshold"])
-            ramp_magnitude = int(form["ramp_magnitude_mg_dl"])
-            mute_duration_minutes = int(form["mute_duration_minutes"])
-            reminder_delay_minutes = int(form["reminder_delay_minutes"])
+            ramp_sensitivity = form["ramp_sensitivity"]
+            on_call_minutes = int(form["on_call_minutes"])
         except (KeyError, ValueError):
             return render_settings(error="Some values were missing or not valid numbers -- nothing was saved.")
 
@@ -639,11 +648,11 @@ def create_app(cfg, controller):
         if not active_days:
             return render_settings(error="Select at least one active day -- nothing was saved.")
 
-        if mute_duration_minutes not in MUTE_DURATION_CHOICES_MINUTES:
-            return render_settings(error="Not a valid mute duration -- nothing was saved.")
+        if ramp_sensitivity not in RAMP_SENSITIVITY_MG_DL:
+            return render_settings(error="Not a valid ramp sensitivity -- nothing was saved.")
 
-        if reminder_delay_minutes not in REMINDER_DELAY_CHOICES_MINUTES:
-            return render_settings(error="Not a valid reminder delay -- nothing was saved.")
+        if on_call_minutes not in ON_CALL_DURATION_CHOICES_MINUTES:
+            return render_settings(error="Not a valid on-call length -- nothing was saved.")
 
         cfg.update(
             window_start=window_start,
@@ -651,9 +660,8 @@ def create_app(cfg, controller):
             active_days=active_days,
             yellow_threshold=yellow_threshold,
             red_threshold=red_threshold,
-            ramp_magnitude_mg_dl=ramp_magnitude,
-            mute_duration_minutes=mute_duration_minutes,
-            reminder_delay_minutes=reminder_delay_minutes,
+            ramp_sensitivity=ramp_sensitivity,
+            on_call_minutes=on_call_minutes,
         )
         controller.notify_settings_changed()
         return redirect(url_for("index", saved="1"))

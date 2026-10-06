@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -145,6 +145,28 @@ class ConfigTests(unittest.TestCase):
         cfg.update(yellow_threshold=150)
         self.assertNotIn("orange_threshold", json.loads(config_module.CONFIG_PATH.read_text()))
 
+    def test_old_ramp_amount_maps_to_nearest_sensitivity(self):
+        for old_mg, expected in [(5, "high"), (10, "high"), (11, "high"), (15, "medium"),
+                                 (17, "medium"), (18, "low"), (30, "low")]:
+            config_module.CONFIG_PATH.write_text(json.dumps({"ramp_magnitude_mg_dl": old_mg, "mute_duration_minutes": 45}))
+            cfg = config_module.Config.load()
+            self.assertEqual(cfg.get_ramp_sensitivity(), expected, old_mg)
+            self.assertNotIn("ramp_magnitude_mg_dl", cfg.as_dict())
+            self.assertNotIn("mute_duration_minutes", cfg.as_dict())
+
+    def test_sensitivity_levels(self):
+        cfg = fresh_config()
+        self.assertEqual(cfg.get_ramp_sensitivity(), "medium")
+        for level, mg in [("high", 8), ("medium", 14), ("low", 20), ("off", None)]:
+            cfg.update(ramp_sensitivity=level)
+            self.assertEqual(cfg.get_ramp_magnitude(), mg)
+
+    def test_old_reminder_setting_is_dropped(self):
+        config_module.CONFIG_PATH.write_text(json.dumps({"reminder_delay_minutes": 20}))
+        cfg = config_module.Config.load()
+        self.assertNotIn("reminder_delay_minutes", cfg.as_dict())
+        self.assertEqual(cfg.get_on_call_minutes(), 60)
+
 
 class GlucoseLoopTests(unittest.TestCase):
     def run_once(self, value, ramp):
@@ -176,9 +198,147 @@ class GlucoseLoopTests(unittest.TestCase):
         app.state.__init__()
         app.state.set_currently_lit("white")
         button = FakeButton()
-        app.handle_long_press(datetime.now(), button, fresh_config())
+        now = datetime.now()
+        app.handle_long_press(now, button, fresh_config())
         self.assertEqual(button.colors, ["off"])
-        self.assertTrue(app.state.is_muted(datetime.now()))
+        self.assertTrue(app.state.is_muted(now + timedelta(minutes=29)))
+        self.assertFalse(app.state.is_muted(now + timedelta(minutes=31)))
+
+
+class RampSensitivityTests(unittest.TestCase):
+    """detect_ramp: the rise needed depends on sensitivity; Off checks nothing."""
+
+    class HistoryDexcom:
+        def __init__(self, rise, trend="Flat"):
+            self.rise, self.trend, self.calls, self.base = rise, trend, 0, datetime(2026, 1, 1, 12, 0)
+
+        def get_glucose_readings(self, minutes=20, max_count=4):
+            self.calls += 1  # each call is a new Dexcom sample, 5 minutes later
+            t = self.base + timedelta(minutes=5 * self.calls)
+            mk = lambda v, dt: type("R", (), {"value": v, "datetime": dt, "trend_direction": self.trend})()
+            return [mk(120 + self.rise, t), mk(120 + self.rise / 2, t - timedelta(minutes=5)), mk(120, t - timedelta(minutes=10))]
+
+    def confirmed(self, sensitivity, rise, trend="Flat"):
+        app.state.__init__()
+        cfg = fresh_config()
+        cfg.update(ramp_sensitivity=sensitivity)
+        dexcom = self.HistoryDexcom(rise, trend)
+        results = [app.detect_ramp(dexcom, cfg) for _ in range(2)]  # needs 2 consecutive samples
+        return results[-1], dexcom.calls
+
+    def test_rise_needed_per_level(self):
+        for level, mg in [("high", 8), ("medium", 14), ("low", 20)]:
+            self.assertTrue(self.confirmed(level, mg)[0], (level, mg))
+            self.assertFalse(self.confirmed(level, mg - 1)[0], (level, mg - 1))
+
+    def test_trend_arrow_still_counts_when_on(self):
+        self.assertTrue(self.confirmed("low", 0, trend="FortyFiveUp")[0])
+
+    def test_off_disables_ramp_detection_entirely(self):
+        ramping, calls = self.confirmed("off", 40, trend="DoubleUp")
+        self.assertFalse(ramping)
+        self.assertEqual(calls, 0, "Off shouldn't even ask Dexcom for history")
+
+
+class OnCallWindowTests(unittest.TestCase):
+    """Double press = a temporary active window (default 1 hour)."""
+
+    def setUp(self):
+        app.state.__init__()
+        self.cfg = fresh_config()  # schedule 11:30-20:00 every day, on-call 60 min
+        self.night = datetime.now().replace(hour=22, minute=0, second=0, microsecond=0)
+
+    def run_loop(self, value, until_colors, timeout=3.0):
+        dexcom, button = FakeDexcom(), FakeButton()
+        dexcom.next_value = value
+        wake, stop = threading.Event(), threading.Event()
+        with mock.patch.object(app, "detect_ramp", lambda d, c: False):
+            thread = threading.Thread(target=app.glucose_loop, args=(dexcom, button, self.cfg, wake, stop), daemon=True)
+            thread.start()
+            deadline = time.time() + timeout
+            while len(button.colors) < until_colors and time.time() < deadline:
+                time.sleep(0.005)
+            stop.set()
+            wake.set()
+            thread.join(2)
+        return button.colors
+
+    def test_double_press_starts_window_flashes_and_wakes_loop(self):
+        button, wake = FakeButton(), threading.Event()
+        app.handle_double_press(self.night, button, self.cfg, wake)
+        self.assertEqual(button.colors, ["blue", "off", "blue", "off", "off"])
+        self.assertTrue(wake.is_set())
+        self.assertTrue(app.state.is_on_call(self.night + timedelta(minutes=59)))
+        self.assertFalse(app.state.is_on_call(self.night + timedelta(minutes=61)))
+
+    def test_on_call_makes_off_schedule_time_active(self):
+        self.assertFalse(app.in_scheduled_window(self.night, self.cfg))
+        self.assertFalse(app.in_window(self.night, self.cfg))
+        app.state.start_on_call(self.night, self.cfg.get_on_call_duration())
+        self.assertTrue(app.in_window(self.night + timedelta(minutes=30), self.cfg))
+        self.assertFalse(app.in_window(self.night + timedelta(minutes=61), self.cfg))
+
+    def test_double_press_again_restarts_the_full_length(self):
+        app.handle_double_press(self.night, FakeButton(), self.cfg, threading.Event())
+        app.handle_double_press(self.night + timedelta(minutes=30), FakeButton(), self.cfg, threading.Event())
+        self.assertEqual(app.state.get_on_call_until(), self.night + timedelta(minutes=90))
+
+    def test_end_flashes_twice_when_going_back_off_schedule(self):
+        app.state.on_call_until = datetime.now() - timedelta(seconds=1)
+        with mock.patch.object(app, "in_scheduled_window", lambda now, c: False):
+            colors = self.run_loop(160, until_colors=6)
+        self.assertEqual(colors[:4], ["blue", "off", "blue", "off"])
+        self.assertEqual(colors[-1], "off")  # outside the window again: high reading no longer lights
+        self.assertIsNone(app.state.get_on_call_until())
+
+    def test_no_end_flash_when_regular_window_has_taken_over(self):
+        app.state.on_call_until = datetime.now() - timedelta(seconds=1)
+        with mock.patch.object(app, "in_scheduled_window", lambda now, c: True):
+            colors = self.run_loop(160, until_colors=1)
+        self.assertEqual(colors, ["yellow"])
+        self.assertIsNone(app.state.get_on_call_until())
+
+    def test_loop_lights_during_window_and_flashes_on_time_at_the_end(self):
+        app.state.on_call_until = datetime.now() + timedelta(seconds=0.4)
+        started = time.time()
+        with mock.patch.object(app, "in_scheduled_window", lambda now, c: False):
+            colors = self.run_loop(160, until_colors=7)
+        elapsed = time.time() - started
+        self.assertEqual(colors[0], "yellow")  # active during on-call, outside the schedule
+        self.assertEqual(colors[1:5], ["blue", "off", "blue", "off"])
+        self.assertEqual(colors[-1], "off")
+        self.assertLess(elapsed, 2.5, "end flash should not wait for the 60 s poll")
+
+    def test_poll_wait_targets_the_on_call_end(self):
+        now = datetime.now()
+        self.assertEqual(app._poll_wait_seconds(now), app.POLL_INTERVAL_SECONDS)
+        app.state.on_call_until = now + timedelta(seconds=10)
+        self.assertAlmostEqual(app._poll_wait_seconds(now), 10.05, places=2)
+        app.state.on_call_until = now + timedelta(hours=2)
+        self.assertEqual(app._poll_wait_seconds(now), app.POLL_INTERVAL_SECONDS)
+        app.state.on_call_until = now - timedelta(seconds=5)
+        self.assertAlmostEqual(app._poll_wait_seconds(now), 0.05, places=3)
+
+    def test_two_real_taps_through_button_loop_start_the_window(self):
+        class TappingButton(FakeButton):
+            """Reports two quick taps (50 ms each, 150 ms apart), then nothing."""
+            def __init__(self):
+                super().__init__()
+                self.t0 = time.monotonic()
+
+            def read_button_state(self):
+                time.sleep(0.002)
+                t = time.monotonic() - self.t0
+                return "pressed" if (t < 0.05 or 0.20 <= t < 0.25) else None
+
+        button, wake = TappingButton(), threading.Event()
+        threading.Thread(target=app.button_loop, args=(button, self.cfg, wake), daemon=True).start()
+        deadline = time.time() + 3
+        while not app.state.get_on_call_until() and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertIsNotNone(app.state.get_on_call_until())
+        self.assertTrue(wake.wait(2))
+        self.assertIn("blue", button.colors)
 
 
 class WebFlowTests(unittest.TestCase):
@@ -202,8 +362,8 @@ class WebFlowTests(unittest.TestCase):
     def settings_form(self, **overrides):
         form = {
             "window_start": "11:30", "window_end": "20:00", "active_days": ["0", "1", "2", "3", "4"],
-            "yellow_threshold": "150", "red_threshold": "200", "ramp_magnitude_mg_dl": "15",
-            "mute_duration_minutes": "30", "reminder_delay_minutes": "20",
+            "yellow_threshold": "150", "red_threshold": "200", "ramp_sensitivity": "medium",
+            "on_call_minutes": "60",
         }
         form.update(overrides)
         return form
@@ -227,7 +387,37 @@ class WebFlowTests(unittest.TestCase):
         self.assertIn("Yellow above", page)
         self.assertIn("green/white/yellow/red/purple", page)
         self.assertNotIn("orange", page.lower())
+        self.assertNotIn("reminder", page.lower())
         self.assertIn('class="btn-primary"', page)
+
+    def test_ramp_sensitivity_setting_and_no_mute_setting(self):
+        self.login()
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn("Mute Duration", page)
+        self.assertNotIn("mute_duration", page)
+        self.assertIn("Mutes whatever's lit for 30 minutes", page)
+        self.assertRegex(page, r'value="medium" selected>\s*Medium &mdash; 14 mg/dL rise over 15 min')
+        for level in ("high", "low", "off"):
+            self.assertIn(f'value="{level}"', page)
+        bad = self.client.post("/settings", data=self.settings_form(ramp_sensitivity="extreme"), follow_redirects=True)
+        self.assertIn(b"Not a valid ramp sensitivity", bad.data)
+        self.client.post("/settings", data=self.settings_form(ramp_sensitivity="off"))
+        self.assertIsNone(self.cfg.get_ramp_magnitude())
+        self.assertRegex(self.client.get("/").get_data(as_text=True), r'value="off" selected>\s*Off')
+
+    def test_on_call_setting_and_status(self):
+        self.login()
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("On-Call Window", page)
+        self.assertRegex(page, r'value="60" selected>\s*1 hour')
+        bad = self.client.post("/settings", data=self.settings_form(on_call_minutes="25"), follow_redirects=True)
+        self.assertIn(b"Not a valid on-call length", bad.data)
+        self.client.post("/settings", data=self.settings_form(on_call_minutes="90"))
+        self.assertEqual(self.cfg.get_on_call_minutes(), 90)
+        self.assertIsNone(self.client.get("/status").json["on_call_until"])
+        app.state.start_on_call(datetime.now(), self.cfg.get_on_call_duration())
+        self.assertIsNotNone(self.client.get("/status").json["on_call_until"])
+        self.assertTrue(self.client.get("/status").json["in_active_window"] or app.in_scheduled_window(datetime.now(), self.cfg))
 
     def test_settings_validation_and_save(self):
         self.login()

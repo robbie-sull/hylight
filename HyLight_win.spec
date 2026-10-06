@@ -37,8 +37,8 @@ from PyInstaller.utils.win32.versioninfo import (
     VSVersionInfo,
 )
 
-VERSION = (0, 4, 0, 0)
-VERSION_STR = "0.4.0"
+VERSION = (0, 5, 0, 0)
+VERSION_STR = "0.5.0"
 
 datas = [
     # web_ui.py reads this at import time to inline the header logo, and

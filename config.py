@@ -18,8 +18,10 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-MUTE_DURATION_CHOICES_MINUTES = [10, 15, 20, 30, 45, 60, 90, 120]
-REMINDER_DELAY_CHOICES_MINUTES = [5, 10, 15, 20, 30, 45, 60]
+# Ramp sensitivity -> minimum mg/dL rise over ~15 min that counts as ramping.
+# "off" turns ramp detection (the white light) off entirely.
+RAMP_SENSITIVITY_MG_DL = {"high": 8, "medium": 14, "low": 20, "off": None}
+ON_CALL_DURATION_CHOICES_MINUTES = [30, 45, 60, 90, 120]
 
 DEFAULTS = {
     "window_start": "11:30",
@@ -27,9 +29,8 @@ DEFAULTS = {
     "active_days": ALL_DAYS,
     "yellow_threshold": 150,
     "red_threshold": 200,
-    "ramp_magnitude_mg_dl": 15,
-    "mute_duration_minutes": 30,
-    "reminder_delay_minutes": 20,
+    "ramp_sensitivity": "medium",
+    "on_call_minutes": 60,
     "dexcom_region": "us",
 }
 
@@ -59,6 +60,16 @@ class Config:
                 if "orange_threshold" in data:
                     data.setdefault("yellow_threshold", data["orange_threshold"])
                     del data["orange_threshold"]
+                # The double-press reminder became the on-call window; its
+                # old delay doesn't carry over, so just drop the setting.
+                data.pop("reminder_delay_minutes", None)
+                # The free-form rise amount became a sensitivity level; keep
+                # the closest one. Mute length is no longer a setting.
+                if "ramp_magnitude_mg_dl" in data:
+                    old = data.pop("ramp_magnitude_mg_dl")
+                    levels = [(mg, name) for name, mg in RAMP_SENSITIVITY_MG_DL.items() if mg]
+                    data.setdefault("ramp_sensitivity", min(levels, key=lambda lv: (abs(lv[0] - old), lv[0]))[1])
+                data.pop("mute_duration_minutes", None)
                 return cls(data)
             except Exception:
                 pass
@@ -102,23 +113,20 @@ class Config:
         with self._lock:
             return self._data["red_threshold"]
 
+    def get_ramp_sensitivity(self):
+        with self._lock:
+            return self._data["ramp_sensitivity"]
+
     def get_ramp_magnitude(self):
+        """mg/dL rise that counts as ramping, or None when sensitivity is "off"."""
+        return RAMP_SENSITIVITY_MG_DL[self.get_ramp_sensitivity()]
+
+    def get_on_call_minutes(self):
         with self._lock:
-            return self._data["ramp_magnitude_mg_dl"]
+            return self._data["on_call_minutes"]
 
-    def get_mute_duration_minutes(self):
-        with self._lock:
-            return self._data["mute_duration_minutes"]
-
-    def get_mute_duration(self):
-        return timedelta(minutes=self.get_mute_duration_minutes())
-
-    def get_reminder_delay_minutes(self):
-        with self._lock:
-            return self._data["reminder_delay_minutes"]
-
-    def get_reminder_delay(self):
-        return timedelta(minutes=self.get_reminder_delay_minutes())
+    def get_on_call_duration(self):
+        return timedelta(minutes=self.get_on_call_minutes())
 
     def get_dexcom_region(self):
         with self._lock:
