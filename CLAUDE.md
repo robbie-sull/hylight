@@ -11,7 +11,9 @@ reports what they see by eye; Claude cannot see the LED.
 | File | Role |
 |---|---|
 | `dexcom_led_button.py` | Entry point + everything runtime: HID wrapper (`LedButton`), glucose loop, button gestures, `MonitorController`, single-instance lock, shutdown/relaunch. The module docstring is the detailed behavior spec -- read it. |
-| `web_ui.py` | Local Flask settings UI (127.0.0.1:8765). One file, inline HTML/CSS/JS, logo embedded as base64 (`assets/logo_header_b64.txt`). Routes: `/`, `/login`, `/settings`, `/disconnect`, `/quit`, `/restart`, `/status`. |
+| `web_ui.py` | Local Flask settings UI (127.0.0.1:8765). One file, inline HTML/CSS/JS, logo embedded as base64 (`assets/logo_header_b64.txt`; the tour cover uses the larger `assets/logo_cover_b64.txt`). `connect_dexcom()` is the Dexcom login shared by `/login` and the tour cover. Routes: `/`, `/login`, `/settings`, `/disconnect`, `/quit`, `/restart`, `/status`. |
+| `onboarding.py` | First-run setup tour (`/setup/1`-`/setup/6`, `/setup/exit`): a cover (big logo, pitch, Dexcom login unless already connected, or "Connect later"), then how the lights work, active window, high levels, ramp sensitivity, on-demand. Each step saves its own settings. Animated SVG scene (sketched button + sample-day chart) drawn by inline JS that mirrors the app's light rules; on the lights and ramp screens the line is drawn in the color the button shows, and the ramp screen uses its own unlabeled yellow line (160) and leaves red out. Shown automatically while `onboarding_done` is false (fresh installs only; older config files count as done), and from a "Take the setup tour" link on the settings page. |
+| `settings_form.py` | `parse_settings_form(form, groups)`: parsing + validation shared by the settings page and the tour. |
 | `config.py` | `Config`: JSON settings in `~/.dexcom_led_button/config.json`. |
 | `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work. |
 | `tray_loop.py` | **Windows only** (pystray + Pillow). Tray icon: "Open HyLight Settings" (also left-click) and "Quit HyLight". Runs on its own thread; `main()` keeps `serve_forever()` and stops the icon in its `finally`. |
@@ -28,19 +30,21 @@ reports what they see by eye; Claude cannot see the LED.
 - **Colors.** PURPLE = below 70 (fixed `LOW_THRESHOLD`). WHITE = ramping up. YELLOW = above the
   "yellow" threshold (default 150). RED = above the red threshold (default 200). GREEN = in range,
   **only ever shown by a short-press preview, never automatically**. BLUE = only ever two quick
-  flashes, when an on-call window starts or ends (never a steady light).
+  flashes, when an on-demand window starts or ends (never a steady light).
   Priority: purple > red > yellow > white. Automatic lights only happen inside the active window
   (default 11:30-20:00); a short press shows status for 3 s at any time.
 - **Gestures.** Short tap: 3 s status preview. Long press (>=0.6 s): mute all alerts for 30 min
   (fixed `MUTE_DURATION`, not a setting); long press again while muted cancels the mute. Double tap: starts an
-  **on-call window** (default 60 min) -- the button behaves as if inside the active window even
+  **on-demand window** (default 60 min; called "on-call" in the code and config keys, e.g.
+  `on_call_minutes`, `start_on_call` -- only the UI wording changed) -- the button behaves as if inside the active window even
   off-schedule (`in_window()` = schedule OR on-call; `in_scheduled_window()` is the schedule alone).
   Double blue flash to confirm; another double blue flash when it ends, skipped if the regular
   window has taken over by then. Double tap again restarts the full length. (This replaced an
   earlier "reminder timer" double-tap feature.)
-- **Settings** (web page): active days/window, yellow & red thresholds, ramp sensitivity, on-call
+- **Settings** (web page): active days/window, yellow & red thresholds, ramp sensitivity, on-demand
   length. Saved immediately and the glucose loop is woken.
-- Ramp detection needs the Dexcom trend arrow OR a rise over ~15 min of at least the sensitivity's
+- Ramp detection needs the Dexcom trend arrow OR a rise over ~15 min (latest reading vs the newest
+  one at least 14 min older; before v0.6 this was mistakenly 10 min) of at least the sensitivity's
   amount (High 8 / Medium 14 / Low 20 mg/dL, `config.RAMP_SENSITIVITY_MG_DL`), confirmed over 2
   consecutive real samples (`RAMP_CONFIRM_CYCLES`). Sensitivity "Off" disables ramp detection
   entirely. Old configs' `ramp_magnitude_mg_dl` maps to the nearest level; `mute_duration_minutes`

@@ -26,6 +26,7 @@ datas = [
     # image -- see web_ui.py's ASSETS_DIR (sys._MEIPASS in a frozen
     # build, not next to web_ui.py's own __file__).
     ("assets/logo_header_b64.txt", "assets"),
+    ("assets/logo_cover_b64.txt", "assets"),
 ]
 binaries = []
 hiddenimports = [
@@ -35,6 +36,8 @@ hiddenimports = [
     # statements in dexcom_led_button.py, listed here too as cheap
     # insurance against that changing later.
     "web_ui",
+    "onboarding",
+    "settings_form",
     "config",
     # Cocoa event loop (native_loop.py) -- imported lazily at runtime and
     # only in the packaged build, so list it and PyObjC's modules
@@ -94,11 +97,11 @@ app = BUNDLE(
     name="HyLight.app",
     icon="assets/HyLight.icns",
     bundle_identifier="com.dankopanko.hylight",
-    version="0.5.0",
+    version="0.6.0",
     info_plist={
         "CFBundleName": "HyLight",
         "CFBundleDisplayName": "HyLight",
-        "CFBundleShortVersionString": "0.5.0",
+        "CFBundleShortVersionString": "0.6.0",
         "NSHumanReadableCopyright": "Danko Panko's",
         "LSMinimumSystemVersion": "11.0",
     },

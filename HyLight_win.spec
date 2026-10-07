@@ -37,14 +37,15 @@ from PyInstaller.utils.win32.versioninfo import (
     VSVersionInfo,
 )
 
-VERSION = (0, 5, 0, 0)
-VERSION_STR = "0.5.0"
+VERSION = (0, 6, 0, 0)
+VERSION_STR = "0.6.0"
 
 datas = [
     # web_ui.py reads this at import time to inline the header logo, and
     # tray_loop.py loads the tray icon -- both from ASSETS_DIR, which is
     # sys._MEIPASS/assets in a frozen build.
     ("assets/logo_header_b64.txt", "assets"),
+    ("assets/logo_cover_b64.txt", "assets"),
     ("assets/HyLight_icon_1024.png", "assets"),
 ]
 binaries = []
@@ -52,6 +53,8 @@ hiddenimports = [
     "keyring.backends.Windows",
     "win32ctypes.core",
     "web_ui",
+    "onboarding",
+    "settings_form",
     "config",
     # Imported lazily in main() on Windows only.
     "tray_loop",

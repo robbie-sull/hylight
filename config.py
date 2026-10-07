@@ -32,6 +32,7 @@ DEFAULTS = {
     "ramp_sensitivity": "medium",
     "on_call_minutes": 60,
     "dexcom_region": "us",
+    "onboarding_done": False,
 }
 
 
@@ -70,6 +71,9 @@ class Config:
                     levels = [(mg, name) for name, mg in RAMP_SENSITIVITY_MG_DL.items() if mg]
                     data.setdefault("ramp_sensitivity", min(levels, key=lambda lv: (abs(lv[0] - old), lv[0]))[1])
                 data.pop("mute_duration_minutes", None)
+                # A config file from before the setup tour existed belongs to
+                # someone already set up -- don't push them through it.
+                data.setdefault("onboarding_done", True)
                 return cls(data)
             except Exception:
                 pass
@@ -127,6 +131,10 @@ class Config:
 
     def get_on_call_duration(self):
         return timedelta(minutes=self.get_on_call_minutes())
+
+    def get_onboarding_done(self):
+        with self._lock:
+            return self._data["onboarding_done"]
 
     def get_dexcom_region(self):
         with self._lock:

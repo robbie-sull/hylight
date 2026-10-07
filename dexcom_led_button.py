@@ -606,7 +606,7 @@ def detect_ramp(dexcom, cfg):
         state.reset_ramp_streak()
         return False
     try:
-        readings = dexcom.get_glucose_readings(minutes=20, max_count=4)
+        readings = dexcom.get_glucose_readings(minutes=30, max_count=6)
     except Exception:
         log.exception("Failed to fetch glucose history for ramp check")
         return False
@@ -617,9 +617,11 @@ def detect_ramp(dexcom, cfg):
     latest = readings[0]  # newest first
     trend_rising = getattr(latest, "trend_direction", None) in RISING_TRENDS
 
-    magnitude_rising = False
-    if len(readings) >= 3:
-        magnitude_rising = (latest.value - readings[2].value) >= magnitude
+    # The rise over ~15 minutes: compare with the newest reading at least 14
+    # minutes older than the latest (Dexcom samples every 5; a gap just means
+    # a slightly longer span, or no magnitude signal if there's nothing old enough).
+    past = next((r for r in readings[1:] if latest.datetime - r.datetime >= timedelta(minutes=14)), None)
+    magnitude_rising = past is not None and (latest.value - past.value) >= magnitude
 
     rising_now = trend_rising or magnitude_rising
     streak = state.bump_ramp_streak_if_new(latest.datetime, rising_now)

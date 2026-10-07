@@ -216,7 +216,9 @@ class RampSensitivityTests(unittest.TestCase):
             self.calls += 1  # each call is a new Dexcom sample, 5 minutes later
             t = self.base + timedelta(minutes=5 * self.calls)
             mk = lambda v, dt: type("R", (), {"value": v, "datetime": dt, "trend_direction": self.trend})()
-            return [mk(120 + self.rise, t), mk(120 + self.rise / 2, t - timedelta(minutes=5)), mk(120, t - timedelta(minutes=10))]
+            span = getattr(self, "span", 15)  # minutes back the oldest reading goes
+            ages = [a for a in (0, 5, 10, 15) if a <= span]
+            return [mk(120 + self.rise * (1 - a / span), t - timedelta(minutes=a)) for a in ages]
 
     def confirmed(self, sensitivity, rise, trend="Flat"):
         app.state.__init__()
@@ -233,6 +235,14 @@ class RampSensitivityTests(unittest.TestCase):
 
     def test_trend_arrow_still_counts_when_on(self):
         self.assertTrue(self.confirmed("low", 0, trend="FortyFiveUp")[0])
+
+    def test_rise_is_measured_over_15_minutes_not_10(self):
+        app.state.__init__()
+        cfg = fresh_config()
+        cfg.update(ramp_sensitivity="medium")  # 14 mg/dL
+        dexcom = self.HistoryDexcom(20)
+        dexcom.span = 10  # only 10 minutes of history: no 15-minute comparison possible
+        self.assertFalse(any(app.detect_ramp(dexcom, cfg) for _ in range(3)))
 
     def test_off_disables_ramp_detection_entirely(self):
         ramping, calls = self.confirmed("off", 40, trend="DoubleUp")
@@ -341,6 +351,158 @@ class OnCallWindowTests(unittest.TestCase):
         self.assertIn("blue", button.colors)
 
 
+class SettingsFormTests(unittest.TestCase):
+    """Validation shared by the settings page and the setup tour."""
+
+    def parse(self, groups, **fields):
+        from werkzeug.datastructures import MultiDict
+        from settings_form import parse_settings_form
+        days = fields.pop("active_days", ["0", "1"])
+        form = MultiDict(list(fields.items()) + [("active_days", d) for d in days])
+        return parse_settings_form(form, groups)
+
+    def test_window(self):
+        self.assertEqual(self.parse(("window",), window_start="21:00", window_end="22:30")[0],
+                         {"window_start": "21:00", "window_end": "22:30", "active_days": [0, 1]})
+        self.assertIn("later than the start", self.parse(("window",), window_start="18:00", window_end="11:30")[1])
+        self.assertIn("times of day", self.parse(("window",), window_start="25:00", window_end="26:00")[1])
+        self.assertIn("at least one", self.parse(("window",), window_start="11:30", window_end="18:00", active_days=[])[1])
+        self.assertIn("at least one", self.parse(("window",), window_start="11:30", window_end="18:00", active_days=["9"])[1])
+
+    def test_thresholds(self):
+        self.assertEqual(self.parse(("thresholds",), yellow_threshold="140", red_threshold="200")[0],
+                         {"yellow_threshold": 140, "red_threshold": 200})
+        self.assertIn("higher than yellow", self.parse(("thresholds",), yellow_threshold="200", red_threshold="200")[1])
+        self.assertIn("between 40 and 400", self.parse(("thresholds",), yellow_threshold="20", red_threshold="200")[1])
+        self.assertIn("not valid numbers", self.parse(("thresholds",), yellow_threshold="abc", red_threshold="200")[1])
+
+    def test_only_requested_groups_are_read(self):
+        self.assertEqual(self.parse(("ramp",), ramp_sensitivity="low"), ({"ramp_sensitivity": "low"}, None))
+        self.assertEqual(self.parse(("on_call",), on_call_minutes="90"), ({"on_call_minutes": 90}, None))
+        self.assertEqual(self.parse((), whatever="x"), ({}, None))
+
+
+class OnboardingTests(unittest.TestCase):
+    """The first-run setup tour."""
+
+    def setUp(self):
+        _keychain.clear()
+        config_module.CONFIG_PATH.unlink(missing_ok=True)
+        app.state.__init__()
+        patcher = mock.patch.object(app, "Dexcom", FakeDexcom)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.cfg = fresh_config()  # fresh install: tour not done
+        self.controller = app.MonitorController(FakeButton(), self.cfg)
+        self.controller.web_server = FakeServer()
+        self.addCleanup(self.controller.disconnect)
+        self.client = web_ui.create_app(self.cfg, self.controller).test_client()
+
+    def test_fresh_install_starts_the_tour(self):
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r.headers["Location"].endswith("/setup/1"))
+
+    def test_existing_users_config_skips_the_tour(self):
+        config_module.CONFIG_PATH.write_text(json.dumps({"yellow_threshold": 140}))
+        self.assertTrue(config_module.Config.load().get_onboarding_done())
+
+    def test_every_screen_renders_with_its_scene(self):
+        import re
+        cover = self.client.get("/setup/1").get_data(as_text=True)
+        self.assertIn("Glucose awareness, right when you need it", cover)
+        self.assertIn('class="cover-logo"', cover)
+        self.assertIn('name="password"', cover)
+        self.assertIn("Connect later", cover)
+        self.assertNotIn('id="scene"', cover)
+        for step, scene, title in [(2, "lights", "What the light tells you"), (3, "window", "When should HyLight watch"),
+                                   (4, "levels", "Set your high levels"), (5, "ramp", "Catch the rise early"),
+                                   (6, "ondemand", "Double-press")]:
+            page = self.client.get(f"/setup/{step}").get_data(as_text=True)
+            self.assertIn(title, page)
+            data = json.loads(re.search(r'<script type="application/json" id="scene-data">(.*?)</script>', page).group(1))
+            self.assertEqual((data["step"], data["scene"]), (step, scene))
+            self.assertEqual(data["ramp_mg"], {"high": 8, "medium": 14, "low": 20, "off": None})
+            self.assertIn('id="scene"', page)
+            self.assertIn("Skip setup", page)
+        self.assertIn('name="window_start"', self.client.get("/setup/3").get_data(as_text=True))
+        self.assertIn('name="ramp_sensitivity" value="off"', self.client.get("/setup/5").get_data(as_text=True))
+        on_demand = self.client.get("/setup/6").get_data(as_text=True)
+        self.assertIn("On-Demand Window", on_demand)
+        self.assertNotIn("kids", on_demand)
+        self.assertNotIn("restart the timer", on_demand)
+
+    def test_walk_through_connects_first_and_saves_each_step(self):
+        r = self.client.post("/setup/1", data={"username": "wearer", "password": "x", "region": "ous"})
+        self.assertTrue(r.headers["Location"].endswith("/setup/2"))
+        self.assertTrue(self.controller.is_running())
+        self.assertEqual(self.cfg.as_dict()["dexcom_region"], "ous")
+        self.assertIn("Connected to Dexcom as <b>wearer</b>", self.client.get("/setup/1").get_data(as_text=True))
+        self.assertTrue(self.client.post("/setup/2").headers["Location"].endswith("/setup/3"))
+        r = self.client.post("/setup/3", data={"window_start": "12:00", "window_end": "17:00", "active_days": ["0", "2", "4"]})
+        self.assertTrue(r.headers["Location"].endswith("/setup/4"))
+        self.assertEqual((self.cfg.as_dict()["window_start"], self.cfg.as_dict()["active_days"]), ("12:00", [0, 2, 4]))
+        self.client.post("/setup/4", data={"yellow_threshold": "140", "red_threshold": "210"})
+        self.assertEqual(self.cfg.get_yellow_threshold(), 140)
+        self.client.post("/setup/5", data={"ramp_sensitivity": "high"})
+        self.assertEqual(self.cfg.get_ramp_sensitivity(), "high")
+        self.assertFalse(self.cfg.get_onboarding_done())
+        r = self.client.post("/setup/6", data={"on_call_minutes": "90"}, follow_redirects=True)
+        self.assertEqual(self.cfg.get_on_call_minutes(), 90)
+        self.assertTrue(self.cfg.get_onboarding_done())
+        self.assertIn(b"Tour complete", r.data)
+
+    def test_bad_login_stays_on_the_cover(self):
+        with mock.patch.object(app, "Dexcom", side_effect=Exception("401")):
+            r = self.client.post("/setup/1", data={"username": "follower", "password": "x", "region": "jp"})
+        page = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Could not log in with those credentials", page)
+        self.assertIn('value="follower"', page)
+        self.assertIn('<option value="jp" selected>', page)
+        self.assertFalse(self.controller.is_running())
+        missing = self.client.post("/setup/1", data={"username": "", "password": ""}).get_data(as_text=True)
+        self.assertIn("Username and password are required.", missing)
+
+    def test_connect_later_ends_on_the_login_page(self):
+        self.assertIn("What the light tells you", self.client.get("/setup/2").get_data(as_text=True))
+        self.assertIn("Next, you'll connect your Dexcom account", self.client.get("/setup/6").get_data(as_text=True))
+        r = self.client.post("/setup/6", data={"on_call_minutes": "60"}, follow_redirects=True)
+        self.assertIn(b"Last step: connect your Dexcom", r.data)
+        self.assertIn(b'name="password"', r.data)
+
+    def test_invalid_step_keeps_what_was_typed_and_saves_nothing(self):
+        r = self.client.post("/setup/3", data={"window_start": "19:00", "window_end": "09:00", "active_days": ["1"]})
+        page = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("The end time must be later than the start time.", page)
+        self.assertIn('value="19:00"', page)
+        self.assertEqual(self.cfg.as_dict()["window_start"], "11:30")
+        r = self.client.post("/setup/4", data={"yellow_threshold": "200", "red_threshold": "180"})
+        self.assertIn(b"Red threshold must be higher than yellow.", r.data)
+        self.assertEqual(self.cfg.get_red_threshold(), 200)
+
+    def test_skip_and_unknown_step(self):
+        self.assertTrue(self.client.get("/setup/9").headers["Location"].endswith("/setup/1"))
+        self.client.post("/setup/exit")
+        self.assertTrue(self.cfg.get_onboarding_done())
+        self.assertIn(b'name="password"', self.client.get("/").data)
+
+    def test_tour_again_from_settings(self):
+        self.cfg.update(onboarding_done=True)
+        self.client.post("/login", data={"username": "w", "password": "x", "region": "us"})
+        settings = self.client.get("/").get_data(as_text=True)
+        self.assertIn('href="/setup/1"', settings)
+        cover = self.client.get("/setup/1").get_data(as_text=True)
+        self.assertIn("Start the tour", cover)
+        self.assertIn("Exit the tour", cover)
+        self.assertNotIn('name="password"', cover)
+        self.assertTrue(self.client.post("/setup/1").headers["Location"].endswith("/setup/2"))
+        done = self.client.post("/setup/6", data={"on_call_minutes": "45"}, follow_redirects=True)
+        self.assertIn(b"Tour complete", done.data)
+        self.assertIn(b"Disconnect Dexcom account", done.data)
+
+
 class WebFlowTests(unittest.TestCase):
     def setUp(self):
         _keychain.clear()
@@ -350,6 +512,7 @@ class WebFlowTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.cfg = fresh_config()
+        self.cfg.update(onboarding_done=True)
         self.button = FakeButton()
         self.controller = app.MonitorController(self.button, self.cfg)
         self.controller.web_server = FakeServer()
@@ -408,10 +571,11 @@ class WebFlowTests(unittest.TestCase):
     def test_on_call_setting_and_status(self):
         self.login()
         page = self.client.get("/").get_data(as_text=True)
-        self.assertIn("On-Call Window", page)
+        self.assertIn("On-Demand Window", page)
+        self.assertNotIn("On-Call", page)
         self.assertRegex(page, r'value="60" selected>\s*1 hour')
         bad = self.client.post("/settings", data=self.settings_form(on_call_minutes="25"), follow_redirects=True)
-        self.assertIn(b"Not a valid on-call length", bad.data)
+        self.assertIn(b"Not a valid on-demand length", bad.data)
         self.client.post("/settings", data=self.settings_form(on_call_minutes="90"))
         self.assertEqual(self.cfg.get_on_call_minutes(), 90)
         self.assertIsNone(self.client.get("/status").json["on_call_until"])

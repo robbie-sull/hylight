@@ -5,7 +5,7 @@ Two states:
     it validates the credentials against Dexcom, saves them to the
     Keychain, and starts monitoring.
   - Connected: "/" shows the settings form (active window, days,
-    thresholds, ramp sensitivity, on-call length). Saving persists to config.py's Config
+    thresholds, ramp sensitivity, on-demand length). Saving persists to config.py's Config
     and takes effect on the next glucose poll / next press.
 
 Kept dependency-free beyond Flask itself (no template files, no
@@ -23,7 +23,9 @@ from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
+import onboarding
 from config import DAY_NAMES, ON_CALL_DURATION_CHOICES_MINUTES, RAMP_SENSITIVITY_MG_DL
+from settings_form import parse_settings_form
 
 # The real logo artwork (wordmark + sun), background-removed and
 # base64-inlined so the rendered page stays a single dependency-free
@@ -38,6 +40,9 @@ else:
     ASSETS_DIR = Path(__file__).parent / "assets"
 with open(ASSETS_DIR / "logo_header_b64.txt") as _f:
     LOGO_HEADER_B64 = _f.read().strip()
+# A larger render of the same artwork for the setup tour's cover screen.
+with open(ASSETS_DIR / "logo_cover_b64.txt") as _f:
+    LOGO_COVER_B64 = _f.read().strip()
 
 # Small inline glucose-trace icons shown next to a couple of section
 # headers -- trusted, developer-authored markup (rendered with |safe).
@@ -332,7 +337,7 @@ BRAND_FOOT = """
           parts.push("muted until " + fmtTime(data.muted_until));
         }
         if (data.on_call_until) {
-          parts.push("on-call until " + fmtTime(data.on_call_until));
+          parts.push("on-demand until " + fmtTime(data.on_call_until));
         }
         text.textContent = "Button connected — " + parts.join(" · ");
       })
@@ -360,6 +365,8 @@ BRAND_FOOT = """
 """
 
 LOGIN_PAGE = BRAND_HEAD + """
+{% if setup_done %}<div class="success">Your settings are saved. Last step: connect your Dexcom
+account so HyLight can see your glucose.</div>{% endif %}
 <h2 style="margin-top:0;">Connect your Dexcom Share account</h2>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 <form method="post" action="{{ url_for('login') }}">
@@ -395,9 +402,10 @@ LOGIN_PAGE = BRAND_HEAD + """
 """ + BRAND_FOOT
 
 SETTINGS_PAGE = BRAND_HEAD + """
-<p class="status">Connected as {{ username }}</p>
+<p class="status">Connected as {{ username }} &middot;
+  <a href="{{ url_for('setup', step=1) }}">Take the setup tour</a></p>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
-{% if saved %}<div class="success" id="saved-banner">Settings saved.</div>{% endif %}
+{% if saved %}<div class="success" id="saved-banner">{{ saved_message or "Settings saved." }}</div>{% endif %}
 
 <div class="card">
   <p class="card-title">Quick Guide</p>
@@ -418,7 +426,7 @@ SETTINGS_PAGE = BRAND_HEAD + """
            -- press and hold again to cancel the mute early.</p>
       </div>
     </div>
-    <a class="press-demo" href="#on-call-window">
+    <a class="press-demo" href="#on-demand-window">
       <div class="press-demo-btn"><div class="press-demo-led led-double"></div></div>
       <div class="press-demo-label">
         <strong>Double press</strong>
@@ -492,8 +500,8 @@ SETTINGS_PAGE = BRAND_HEAD + """
     </div>
   </fieldset>
 
-  <fieldset id="on-call-window">
-    <legend>On-Call Window</legend>
+  <fieldset id="on-demand-window">
+    <legend>On-Demand Window</legend>
     <label for="on_call_minutes">A double press turns the button on for</label>
     <select id="on_call_minutes" name="on_call_minutes">
       {% for minutes in on_call_choices %}
@@ -571,11 +579,32 @@ def duration_label(minutes):
     return "1 hour" if hours == 1 else f"{hours:g} hours"
 
 
+def connect_dexcom(controller, form):
+    """Logs in with a submitted Dexcom form and starts monitoring. Returns
+    an error message for the page, or None once connected."""
+    username = form.get("username", "").strip()
+    password = form.get("password", "")
+    region = form.get("region", "us")
+    if not username or not password:
+        return "Username and password are required."
+    try:
+        controller.start(username, password, region)
+    except Exception as exc:
+        # The page only shows a generic message; log the real reason
+        # (bad password vs. network/SSL trouble) for diagnosing pilots.
+        logging.getLogger("led-button").warning(
+            "Login attempt failed: %s: %s", type(exc).__name__, exc
+        )
+        return ("Could not log in with those credentials. Double-check your "
+                "Dexcom Share username/password and that Share is turned on.")
+    return None
+
+
 def create_app(cfg, controller):
     app = Flask(__name__)
     app.jinja_env.filters["duration"] = duration_label
 
-    def render_settings(error=None, saved=False):
+    def render_settings(error=None, saved=False, saved_message=None):
         return render_template_string(
             SETTINGS_PAGE,
             cfg=cfg.as_dict(),
@@ -587,6 +616,7 @@ def create_app(cfg, controller):
             icon_ramp=ICON_RAMP,
             error=error,
             saved=saved,
+            saved_message=saved_message,
         )
 
     @app.route("/status", methods=["GET"])
@@ -595,33 +625,20 @@ def create_app(cfg, controller):
 
     @app.route("/", methods=["GET"])
     def index():
+        if not cfg.get_onboarding_done():
+            return redirect(url_for("setup", step=1))
+        setup_done = request.args.get("setup") == "done"
         if not controller.is_running():
-            return render_template_string(LOGIN_PAGE, error=None)
+            return render_template_string(LOGIN_PAGE, error=None, setup_done=setup_done)
+        if setup_done:
+            return render_settings(saved=True, saved_message="Tour complete. Your settings are saved.")
         return render_settings(saved=request.args.get("saved") == "1")
 
     @app.route("/login", methods=["POST"])
     def login():
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        region = request.form.get("region", "us")
-
-        if not username or not password:
-            return render_template_string(LOGIN_PAGE, error="Username and password are required.")
-
-        try:
-            controller.start(username, password, region)
-        except Exception as exc:
-            # The page only shows a generic message; log the real reason
-            # (bad password vs. network/SSL trouble) for diagnosing pilots.
-            logging.getLogger("led-button").warning(
-                "Login attempt failed: %s: %s", type(exc).__name__, exc
-            )
-            return render_template_string(
-                LOGIN_PAGE,
-                error="Could not log in with those credentials. Double-check your "
-                      "Dexcom Share username/password and that Share is turned on.",
-            )
-
+        error = connect_dexcom(controller, request.form)
+        if error:
+            return render_template_string(LOGIN_PAGE, error=error)
         return redirect(url_for("index"))
 
     @app.route("/settings", methods=["POST"])
@@ -629,40 +646,10 @@ def create_app(cfg, controller):
         if not controller.is_running():
             return redirect(url_for("index"))
 
-        form = request.form
-        active_days = [int(d) for d in form.getlist("active_days")]
-
-        try:
-            window_start = form["window_start"]
-            window_end = form["window_end"]
-            yellow_threshold = int(form["yellow_threshold"])
-            red_threshold = int(form["red_threshold"])
-            ramp_sensitivity = form["ramp_sensitivity"]
-            on_call_minutes = int(form["on_call_minutes"])
-        except (KeyError, ValueError):
-            return render_settings(error="Some values were missing or not valid numbers -- nothing was saved.")
-
-        if red_threshold <= yellow_threshold:
-            return render_settings(error="Red threshold must be higher than yellow -- nothing was saved.")
-
-        if not active_days:
-            return render_settings(error="Select at least one active day -- nothing was saved.")
-
-        if ramp_sensitivity not in RAMP_SENSITIVITY_MG_DL:
-            return render_settings(error="Not a valid ramp sensitivity -- nothing was saved.")
-
-        if on_call_minutes not in ON_CALL_DURATION_CHOICES_MINUTES:
-            return render_settings(error="Not a valid on-call length -- nothing was saved.")
-
-        cfg.update(
-            window_start=window_start,
-            window_end=window_end,
-            active_days=active_days,
-            yellow_threshold=yellow_threshold,
-            red_threshold=red_threshold,
-            ramp_sensitivity=ramp_sensitivity,
-            on_call_minutes=on_call_minutes,
-        )
+        values, error = parse_settings_form(request.form)
+        if error:
+            return render_settings(error=error + " -- nothing was saved.")
+        cfg.update(**values)
         controller.notify_settings_changed()
         return redirect(url_for("index", saved="1"))
 
@@ -684,4 +671,6 @@ def create_app(cfg, controller):
         controller.request_restart()
         return render_template_string(RESTART_PAGE)
 
+    onboarding.register(app, cfg, controller, BRAND_HEAD, BRAND_FOOT,
+                        lambda form: connect_dexcom(controller, form), LOGO_COVER_B64)
     return app
