@@ -97,11 +97,11 @@ app = BUNDLE(
     name="HyLight.app",
     icon="assets/HyLight.icns",
     bundle_identifier="com.dankopanko.hylight",
-    version="0.6.0",
+    version="0.6.1",
     info_plist={
         "CFBundleName": "HyLight",
         "CFBundleDisplayName": "HyLight",
-        "CFBundleShortVersionString": "0.6.0",
+        "CFBundleShortVersionString": "0.6.1",
         "NSHumanReadableCopyright": "Danko Panko's",
         "LSMinimumSystemVersion": "11.0",
     },

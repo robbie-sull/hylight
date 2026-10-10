@@ -368,6 +368,8 @@ LOGIN_PAGE = BRAND_HEAD + """
 {% if setup_done %}<div class="success">Your settings are saved. Last step: connect your Dexcom
 account so HyLight can see your glucose.</div>{% endif %}
 <h2 style="margin-top:0;">Connect your Dexcom Share account</h2>
+{% if not setup_done %}<p class="status">No Dexcom account yet, or just looking around?
+  <a href="{{ url_for('setup', step=2) }}">Take the setup tour</a></p>{% endif %}
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 <form method="post" action="{{ url_for('login') }}">
   <fieldset>

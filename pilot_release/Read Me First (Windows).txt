@@ -1,4 +1,4 @@
-HYLIGHT PILOT FOR WINDOWS  -  v0.6.0                    Danko Panko's HyLight
+HYLIGHT PILOT FOR WINDOWS  -  v0.6.1                    Danko Panko's HyLight
 ==========================================================================
 
 HyLight turns your HyLight button into a glucose light. It reads your Dexcom
@@ -38,7 +38,9 @@ SET UP (about 5 minutes)
    the Dexcom login of the person wearing the sensor, pick your region, and
    click "Connect and continue". Five quick screens then explain the lights
    and choose your hours, high levels, ramp sensitivity and on-demand length.
-   (You can take the tour again any time from the settings page.)
+   No Dexcom account yet? Click "Connect later" to look around first.
+   (You can take the tour again any time from the settings page, or from
+   the sign-in page if you haven't connected yet.)
    Your login is stored safely in Windows Credential Manager.
 
 5. The status line at the top of the page should say

@@ -488,6 +488,19 @@ class OnboardingTests(unittest.TestCase):
         self.assertTrue(self.cfg.get_onboarding_done())
         self.assertIn(b'name="password"', self.client.get("/").data)
 
+    def test_login_page_leads_into_the_tour_without_an_account(self):
+        self.client.post("/setup/exit")  # skipped the tour, or an older install
+        login = self.client.get("/").get_data(as_text=True)
+        self.assertIn('name="password"', login)
+        self.assertIn('href="/setup/2">Take the setup tour', login)
+        slide = self.client.get("/setup/2")
+        self.assertEqual(slide.status_code, 200)
+        self.assertIn("What the light tells you", slide.get_data(as_text=True))
+        self.assertFalse(self.controller.is_running())
+        finished = self.client.post("/setup/6", data={"on_call_minutes": "60"}, follow_redirects=True).get_data(as_text=True)
+        self.assertIn("Last step: connect your Dexcom", finished)
+        self.assertNotIn("Take the setup tour", finished)
+
     def test_tour_again_from_settings(self):
         self.cfg.update(onboarding_done=True)
         self.client.post("/login", data={"username": "w", "password": "x", "region": "us"})
