@@ -39,6 +39,7 @@ hiddenimports = [
     "onboarding",
     "settings_form",
     "config",
+    "nightscout",
     # Cocoa event loop (native_loop.py) -- imported lazily at runtime and
     # only in the packaged build, so list it and PyObjC's modules
     # explicitly rather than trusting static analysis to find them.
@@ -97,12 +98,16 @@ app = BUNDLE(
     name="HyLight.app",
     icon="assets/HyLight.icns",
     bundle_identifier="com.dankopanko.hylight",
-    version="0.6.1",
+    version="0.7.0",
     info_plist={
         "CFBundleName": "HyLight",
         "CFBundleDisplayName": "HyLight",
-        "CFBundleShortVersionString": "0.6.1",
+        "CFBundleShortVersionString": "0.7.0",
         "NSHumanReadableCopyright": "Danko Panko's",
         "LSMinimumSystemVersion": "11.0",
+        # macOS 15+ asks before an app may reach devices on the local network;
+        # without this text the request can fail silently. Only the
+        # xDrip+-on-the-same-Wi-Fi source needs it (see nightscout.py).
+        "NSLocalNetworkUsageDescription": "HyLight reads glucose from xDrip+ on a phone on your network, if you choose that.",
     },
 )

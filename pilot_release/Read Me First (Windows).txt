@@ -1,11 +1,12 @@
-HYLIGHT PILOT FOR WINDOWS  -  v0.6.1                    Danko Panko's HyLight
+HYLIGHT PILOT FOR WINDOWS  -  v0.7.0                    Danko Panko's HyLight
 ==========================================================================
 
 HyLight turns your HyLight button into a glucose light. It reads your Dexcom
-numbers and glows a color when something needs your attention.
+numbers (or your Nightscout site, or xDrip+) and glows a color when
+something needs your attention.
 
 IMPORTANT: This is a pilot of a convenience light. It is NOT a medical device.
-Keep using your Dexcom app and its alarms exactly as you do today.
+Keep using your CGM app and its alarms exactly as you do today.
 
 
 WHAT YOU NEED
@@ -15,6 +16,8 @@ WHAT YOU NEED
    with at least one follower added)
  - The Dexcom login of the person WEARING the sensor. Do not use a
    follower's account - it will log in but show no readings.
+ OR, instead of Dexcom Share: a Nightscout site, or xDrip+ on an Android
+   phone on the same Wi-Fi. See "USING NIGHTSCOUT OR xDRIP+" below.
 
 
 SET UP (about 5 minutes)
@@ -34,14 +37,19 @@ SET UP (about 5 minutes)
    common to new apps; restore it from your antivirus's quarantine or
    allow it, then extract the zip again.
 
-4. Your browser opens a short setup tour. On the first screen, sign in with
-   the Dexcom login of the person wearing the sensor, pick your region, and
-   click "Connect and continue". Five quick screens then explain the lights
-   and choose your hours, high levels, ramp sensitivity and on-demand length.
-   No Dexcom account yet? Click "Connect later" to look around first.
-   (You can take the tour again any time from the settings page, or from
-   the sign-in page if you haven't connected yet.)
-   Your login is stored safely in Windows Credential Manager.
+4. Your browser opens a short setup tour. On the first screen, choose where
+   your glucose comes from:
+     Dexcom: sign in with the Dexcom login of the person wearing the
+        sensor, and pick your region.
+     Nightscout or xDrip+: see the next section.
+   Then click "Connect and continue". Five quick screens then explain the
+   lights and choose your hours, high levels, ramp sensitivity and
+   on-demand length. (You can take the tour again any time from the
+   settings page.)
+   No account yet? Click "Connect later" to look around first. (You can
+   also start the tour from the connect page if you haven't connected yet.)
+   Your login, token or secret is stored safely in Windows Credential
+   Manager.
 
 5. The status line at the top of the page should say
    "Button connected - showing ... BG ...". You're set.
@@ -56,6 +64,37 @@ TIP: For a desktop shortcut, right-click HyLight.exe > Send to > Desktop
 (create shortcut). On Windows 11, click "Show more options" first.
 
 
+USING NIGHTSCOUT OR xDRIP+
+--------------------------
+Choose the "Nightscout or xDrip+" tab on the first setup screen (or on the
+connect page).
+
+ Nightscout - works anywhere: home, school, office.
+   Address: your Nightscout site, e.g. https://your-site.example.com
+   Token:   make a read-only one. In Nightscout: Admin Tools > Add new
+            Subject, give it a name and the role "readable", save, then
+            copy its access token (it looks like school-a595d5f0aeff64c0).
+            Your API secret also works, but it can change data too, so a
+            token is safer - and deleting the token later cuts HyLight off.
+   Anything that uploads to Nightscout works: xDrip+, xDrip4iOS, Juggluco,
+   AAPS, Loop, Trio and others, with Dexcom or Libre sensors.
+
+ xDrip+ on the same Wi-Fi - Android only, no Nightscout needed.
+   In xDrip+: Settings > Inter-app settings > turn on "xDrip Web Service"
+   and "Open Web Service". Setting an "xDrip Web Service Secret" there is
+   a good idea.
+   Address: http://PHONE-IP:17580, where PHONE-IP is the phone's Wi-Fi IP
+            address (in Android's Wi-Fi settings, open the connected
+            network's details).
+   Secret:  the xDrip Web Service Secret. Leave it blank if none is set.
+   The phone and this PC must be on the same Wi-Fi, and the phone's
+   address can change. School and office Wi-Fi often stop phones and
+   computers from talking to each other; Nightscout avoids all of that.
+
+HyLight checks the address before saving it, and says what's wrong if it
+can't connect.
+
+
 USING THE BUTTON
 ----------------
  Colors   GREEN  = in range (only shown when you tap the button)
@@ -65,6 +104,7 @@ USING THE BUTTON
           PURPLE = low: below 70
           BLUE   = two quick flashes: an on-demand hour started or ended
  Tap          Shows your current status for 3 seconds, any time of day.
+              Stays dark if HyLight has no reading from the last 10 minutes.
  Press & hold Mutes the current alert for 30 minutes. Hold again to un-mute.
  Double tap   Turns the button on for an hour, even outside your active
               window (handy for an evening work session). Two blue flashes
@@ -74,6 +114,9 @@ USING THE BUTTON
 Automatic lights only happen inside your "active window" (default 11:30 AM -
 8:00 PM) or an on-demand hour. Change the window, thresholds, ramp sensitivity
 (or turn ramp detection off) and on-demand length on the settings page.
+
+A light goes out once its reading is over 10 minutes old, even if HyLight
+can't reach your glucose source to get a newer one.
 
 
 QUITTING AND RESTARTING
@@ -85,8 +128,8 @@ button if you meant to restart it.
 Shutting down or signing out of Windows also turns the light off.
 If HyLight is ever ended from Task Manager, the button can stay lit. Just
 open HyLight again and quit it normally.
-To stop using HyLight: click "Disconnect Dexcom account" on the settings
-page, quit, then delete the HyLight folder.
+To stop using HyLight: click the "Disconnect" button under "Glucose source"
+on the settings page, quit, then delete the HyLight folder.
 
 
 IF SOMETHING LOOKS WRONG
@@ -94,10 +137,15 @@ IF SOMETHING LOOKS WRONG
  "Button not detected": unplug and replug the button. Only one program can
     use the button at a time, so close anything else that might be using it.
  No light when you expect one: look at the status line at the top of the
-    page. It shows the BG HyLight sees and what it is showing. Remember
-    automatic lights only appear inside the active window.
- No BG number at all: Share is probably off, or you signed in with a
-    follower's account. Disconnect, then sign in again with the wearer's.
+    page. It shows the BG HyLight sees and what it is showing, or why it has
+    no BG. Remember automatic lights only appear inside the active window.
+ No BG number at all (Dexcom): Share is probably off, or you signed in with
+    a follower's account. Disconnect, then sign in again with the wearer's.
+ "no reading in the last 10 minutes" (Nightscout or xDrip+): readings
+    stopped arriving. Check the phone is on, xDrip+ (or your uploader) is
+    running, and - for Nightscout - that it's still uploading.
+ "Couldn't reach ...": check the address. For xDrip+, check the phone is
+    on the same Wi-Fi with the web service on, and its IP hasn't changed.
 
 
 FEEDBACK
@@ -107,9 +155,10 @@ whether the colors and timing feel right in real life. If something breaks,
 send me this log file. To find it, press Windows key + R, paste this, and
 press Enter:
     %USERPROFILE%\.dexcom_led_button
-The file is hylight.log. It records your glucose readings and Dexcom
-username, but never your password. Share it only if you are comfortable
-doing so.
+The file is hylight.log. It records your glucose readings and your Dexcom
+username or Nightscout / xDrip+ address, but never your password, token or
+secret. Share it only if you are comfortable doing so.
 
-Privacy: HyLight only talks to Dexcom's servers and to your own PC. Your
-Dexcom login is kept in Windows Credential Manager.
+Privacy: HyLight only talks to the glucose source you choose (Dexcom's
+servers, your Nightscout site, or the xDrip+ phone) and to your own PC.
+Your login, token or secret is kept in Windows Credential Manager.

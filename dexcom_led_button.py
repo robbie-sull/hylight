@@ -159,6 +159,10 @@ Setup
    if your pip complains about an externally-managed environment)
 2. In your Dexcom app: Settings -> Share -> turn Share on and add at
    least one follower.
+   Or skip Dexcom Share and read glucose from a Nightscout site, or from
+   xDrip+ on a phone on the same Wi-Fi -- see nightscout.py. (Then set
+   NIGHTSCOUT_ADDRESS / NIGHTSCOUT_SECRET instead of the DEXCOM_* variables
+   below, or use the settings page.)
 3. macOS: grant your terminal app (or the app bundle, once packaged)
    Input Monitoring access under
    System Settings -> Privacy & Security -> Input Monitoring.
@@ -180,13 +184,15 @@ Setup
 Settings UI
 -----------
 web_ui.py contains a small local-only (127.0.0.1) Flask app that:
-  - Shows a Dexcom Share login form until credentials are connected,
-    then starts monitoring automatically on a successful login.
+  - Shows a login form -- Dexcom Share, or a Nightscout / xDrip+ address --
+    until a glucose source is connected, then starts monitoring
+    automatically on a successful login.
   - Shows a settings form (active days, window start/end, yellow/red
     thresholds, ramp sensitivity and on-call length) once connected.
 All settings are persisted via config.py to
-~/.dexcom_led_button/config.json. Dexcom credentials are never written
-there -- they only ever live in the OS keychain via `keyring`.
+~/.dexcom_led_button/config.json. Credentials (the Dexcom login, or the
+Nightscout / xDrip+ address and token) are never written there -- they
+only ever live in the OS keychain via `keyring`.
 """
 
 import os
@@ -199,13 +205,14 @@ import getpass
 import threading
 import webbrowser
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import hid
 from pydexcom import Dexcom
 
 from config import Config, CONFIG_DIR
+from nightscout import Nightscout, NightscoutError
 
 KEYCHAIN_SERVICE = "dexcom_led_button"
 # What the OS calls the place keyring stores the login, for log messages.
@@ -250,6 +257,10 @@ MUTE_DURATION = timedelta(minutes=30)  # how long a long press mutes alerts
 LOW_THRESHOLD = 70                  # current glucose below this -> PURPLE;
                                      # a fixed clinical low, not exposed in
                                      # settings (like RAMP_CONFIRM_CYCLES)
+CURRENT_READING_MAX_AGE = timedelta(minutes=10)  # a reading counts as current
+                                     # this long (pydexcom's own rule); after
+                                     # that its light goes out even if the
+                                     # source can't be reached to say so
 
 DOUBLE_PRESS_WINDOW = 0.5           # max gap between two short taps' releases
 LONG_PRESS_THRESHOLD = 0.6          # held at least this long => long press
@@ -487,6 +498,8 @@ class State:
         self.currently_lit = "off"    # what color is actually displayed right now
         self.latest_value = None      # most recent glucose value seen (any time of day)
         self.latest_ramp_confirmed = False
+        self.latest_taken_at = None   # when that reading was taken (aware, UTC)
+        self.data_problem = None      # why there's no current glucose, for the status line
         self._ramp_streak = 0
         self._last_ramp_dt = None     # datetime of last Dexcom sample we scored
 
@@ -524,14 +537,30 @@ class State:
             return self.currently_lit
 
     # -- latest reading, cached for the outside-window hold preview -----
-    def set_latest_reading(self, value, ramp_confirmed):
+    def set_latest_reading(self, value, ramp_confirmed, taken_at=None):
         with self.lock:
             self.latest_value = value
             self.latest_ramp_confirmed = ramp_confirmed
+            self.latest_taken_at = taken_at if value is not None else None
 
     def get_latest_reading(self):
         with self.lock:
             return self.latest_value, self.latest_ramp_confirmed
+
+    def latest_is_stale(self, now_utc):
+        """True when there's no cached reading, or it's older than a reading
+        counts as current (CURRENT_READING_MAX_AGE)."""
+        with self.lock:
+            taken_at = self.latest_taken_at if self.latest_value is not None else None
+        return taken_at is None or now_utc - taken_at > CURRENT_READING_MAX_AGE
+
+    def set_data_problem(self, message):
+        with self.lock:
+            self.data_problem = message
+
+    def get_data_problem(self):
+        with self.lock:
+            return self.data_problem
 
     # -- on-call window (double press) ----------------------------------
     def start_on_call(self, now, duration):
@@ -652,7 +681,10 @@ def compute_preview_color(value, ramp_confirmed, cfg):
     outside-window preview, which should always show something
     meaningful rather than "off" -- green means everything's currently
     fine. Never shown automatically, only ever as a direct response to
-    a short press."""
+    a short press. With no current reading at all it stays dark: green
+    would claim "fine" with nothing to base it on."""
+    if value is None:
+        return "off"
     color = compute_status_color(value, ramp_confirmed, cfg)
     return "green" if color == "off" else color
 
@@ -676,7 +708,23 @@ def _poll_wait_seconds(now):
     return min(POLL_INTERVAL_SECONDS, max(0.0, (until - now).total_seconds()) + 0.05)
 
 
+def _source_name(client):
+    """For messages: "Nightscout" / "xDrip+" (nightscout.Nightscout says), else Dexcom."""
+    return getattr(client, "source_name", "Dexcom")
+
+
+def _taken_at(reading):
+    """When a reading was taken, as an aware UTC datetime. pydexcom's and
+    nightscout's readings carry an aware datetime; one without counts as now."""
+    when = getattr(reading, "datetime", None)
+    if not isinstance(when, datetime):
+        return datetime.now(timezone.utc)
+    return when.astimezone(timezone.utc)  # a naive time is taken as local
+
+
 def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
+    """`dexcom` is pydexcom's Dexcom or a nightscout.Nightscout: both answer
+    get_current_glucose_reading() and get_glucose_readings() the same way."""
     while not stop_event.is_set():
         now = datetime.now()
         if state.consume_on_call_expiry(now) and not in_scheduled_window(now, cfg):
@@ -684,12 +732,31 @@ def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
 
         try:
             reading = dexcom.get_current_glucose_reading()
-        except Exception:
-            log.exception("Failed to fetch current glucose reading")
+        except Exception as exc:
+            if stop_event.is_set():
+                break  # disconnected while waiting on the source
+            if isinstance(exc, NightscoutError):
+                log.warning("Failed to fetch current glucose reading: %s", exc)
+                state.set_data_problem(str(exc))
+            else:
+                log.exception("Failed to fetch current glucose reading")
+                state.set_data_problem(f"can't reach {_source_name(dexcom)}")
+            # A blip leaves the light as it is, but only while the last
+            # reading still counts as current: a phone that left the Wi-Fi,
+            # a dead phone battery or an offline laptop mustn't keep an old
+            # color lit (or the status line showing an old BG) for hours.
+            if state.latest_is_stale(datetime.now(timezone.utc)):
+                state.set_latest_reading(None, False)
+                button.set_color("off")
+                state.set_currently_lit("off")
             _sleep_or_wake(wake_event, _poll_wait_seconds(datetime.now()))
             continue
+        if stop_event.is_set():
+            break  # disconnected while waiting: leave the LED to the next source
 
         value = reading.value if reading else None
+        taken_at = _taken_at(reading) if reading else None
+        state.set_data_problem(None if reading else "no reading in the last 10 minutes")
 
         active_color = None
         ramp_confirmed = False
@@ -697,7 +764,7 @@ def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
         yellow_threshold = cfg.get_yellow_threshold()
         if value is not None and in_window(now, cfg):
             ramp_confirmed = detect_ramp(dexcom, cfg)
-            state.set_latest_reading(value, ramp_confirmed)
+            state.set_latest_reading(value, ramp_confirmed, taken_at)
 
             if not state.is_muted(now):
                 if value < LOW_THRESHOLD:
@@ -720,7 +787,7 @@ def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
             # Ramp detection is window-specific, but the raw value is still
             # cached so the outside-window preview can show red/yellow
             # based on the true current reading.
-            state.set_latest_reading(value, False)
+            state.set_latest_reading(value, False, taken_at)
             log.info("BG=%s (outside active window)", value)
         else:
             # Dexcom's Share API can return a 200 with no reading at all
@@ -728,8 +795,18 @@ def glucose_loop(dexcom, button, cfg, wake_event, stop_event):
             # turned off, or no follower attached to the account. That
             # used to be silently indistinguishable from the process
             # being dead, since nothing logged in this branch before.
-            log.info("No current reading returned by Dexcom Share API")
+            # Nightscout / xDrip+ land here too when the newest reading is
+            # over 10 minutes old (phone off, uploads stopped). Either way
+            # the old value is dropped, so neither a tap preview nor the
+            # status line can show it as if it were current.
+            state.set_latest_reading(None, False)
+            if isinstance(dexcom, Nightscout):
+                log.info("No current reading from %s (none in the last 10 minutes)", _source_name(dexcom))
+            else:
+                log.info("No current reading returned by Dexcom Share API")
 
+        if stop_event.is_set():
+            break  # disconnected during the ramp check's request
         display_color = active_color or "off"
         button.set_color(display_color)
         state.set_currently_lit(display_color)
@@ -933,11 +1010,50 @@ def save_credentials_to_keychain(username, password):
         log.info("Saved credentials to %s for next time.", CREDENTIAL_STORE)
 
 
-def clear_saved_credentials():
+NIGHTSCOUT_ADDRESS_KEY = "nightscout_address"
+NIGHTSCOUT_SECRET_KEY = "nightscout_secret"
+
+
+def get_nightscout_credentials():
+    """(address, secret) for a Nightscout site or xDrip+, exactly as typed
+    (nightscout.parse_address reads them each time), or (None, "") if none
+    is saved. NIGHTSCOUT_ADDRESS / NIGHTSCOUT_SECRET in the environment win,
+    like the DEXCOM_* variables."""
+    address = os.environ.get("NIGHTSCOUT_ADDRESS")
+    if address:
+        return address, os.environ.get("NIGHTSCOUT_SECRET", "")
+    keyring = _get_keyring()
+    if keyring is None:
+        return None, ""
+    return (keyring.get_password(KEYCHAIN_SERVICE, NIGHTSCOUT_ADDRESS_KEY),
+            keyring.get_password(KEYCHAIN_SERVICE, NIGHTSCOUT_SECRET_KEY) or "")
+
+
+def save_nightscout_credentials(address, secret):
+    """The address goes in the keychain too: it can hold a token (?token=)
+    or a secret (https://SECRET@...), and a site that's readable without a
+    token exposes data to anyone who has its address."""
     keyring = _get_keyring()
     if keyring is None:
         return
-    for key in ("username", "password"):
+    keyring.set_password(KEYCHAIN_SERVICE, NIGHTSCOUT_ADDRESS_KEY, address)
+    if secret:
+        keyring.set_password(KEYCHAIN_SERVICE, NIGHTSCOUT_SECRET_KEY, secret)
+    else:
+        try:
+            keyring.delete_password(KEYCHAIN_SERVICE, NIGHTSCOUT_SECRET_KEY)
+        except Exception:
+            pass
+    log.info("Saved the Nightscout / xDrip+ address to %s for next time.", CREDENTIAL_STORE)
+
+
+def clear_saved_credentials():
+    """Forgets every saved glucose source: the Dexcom login and the
+    Nightscout / xDrip+ address and secret."""
+    keyring = _get_keyring()
+    if keyring is None:
+        return
+    for key in ("username", "password", NIGHTSCOUT_ADDRESS_KEY, NIGHTSCOUT_SECRET_KEY):
         try:
             keyring.delete_password(KEYCHAIN_SERVICE, key)
         except Exception:
@@ -950,8 +1066,9 @@ def clear_saved_credentials():
 
 
 class MonitorController:
-    """Owns starting the glucose/button threads once Dexcom credentials
-    are available. Safe to call start() more than once - only the first
+    """Owns starting the glucose/button threads once a glucose source is
+    connected: Dexcom Share (start) or a Nightscout site / xDrip+
+    (start_nightscout). Safe to call either more than once - only the first
     call (while not already running) does anything."""
 
     def __init__(self, button, cfg):
@@ -960,8 +1077,12 @@ class MonitorController:
         self._lock = threading.Lock()
         self._running = False
         self.dexcom_username = None
+        self.source = None       # "dexcom" or "nightscout" while monitoring
+        self.source_name = None  # "Dexcom", "Nightscout" or "xDrip+", for the page
+        self.account = None      # the Dexcom username, or the site / phone address
         self._settings_changed = threading.Event()
         self._stop_glucose_loop = threading.Event()
+        self._button_thread = None
         self.web_server = None  # set once main() constructs it
         self._restart_requested = False
         self._pending_quit_timer = None
@@ -997,6 +1118,9 @@ class MonitorController:
             "muted": state.is_muted(now),
             "muted_until": mute_until.isoformat(timespec="seconds") if mute_until else None,
             "on_call_until": on_call_until.isoformat(timespec="seconds") if on_call_until else None,
+            "source": self.source if monitoring else None,
+            "source_name": self.source_name if monitoring else None,
+            "data_problem": state.get_data_problem() if monitoring else None,
         }
 
     def notify_settings_changed(self):
@@ -1054,21 +1178,54 @@ class MonitorController:
             dexcom = Dexcom(username=username, password=password, region=region)
 
             save_credentials_to_keychain(username, password)
-            self.cfg.update(dexcom_region=region)
+            self.cfg.update(dexcom_region=region, glucose_source="dexcom")
             self.dexcom_username = username
+            self._launch(dexcom, "dexcom", "Dexcom", username)
 
-            self.button.set_color("off")
-            self._stop_glucose_loop.clear()
-            threading.Thread(
-                target=glucose_loop,
-                args=(dexcom, self.button, self.cfg, self._settings_changed, self._stop_glucose_loop),
-                daemon=True,
-            ).start()
-            threading.Thread(
+    def start_nightscout(self, address, secret="", verify=True):
+        """Connects to a Nightscout site or xDrip+'s web service (see
+        nightscout.py), saves the address to the Keychain and starts
+        monitoring. With verify=True (connecting from the page) a failed
+        first request raises NightscoutError and nothing is saved or
+        started. At launch, with a saved address, verify=False: a phone
+        that's off the Wi-Fi right now, or a free-tier site still waking
+        up, is something the loop retries every minute -- not a reason to
+        forget the address."""
+        with self._lock:
+            if self._running:
+                return
+            client = Nightscout(address, secret, verify=verify)
+
+            save_nightscout_credentials(address, secret)
+            self.cfg.update(glucose_source="nightscout")
+            self.dexcom_username = None
+            self._launch(client, "nightscout", client.source_name, client.label)
+
+    def _launch(self, client, source, source_name, account):
+        """Starts the glucose loop on `client`. Called with self._lock held."""
+        self.source, self.source_name, self.account = source, source_name, account
+        state.reset_ramp_streak()  # a new data stream: don't carry a streak over
+        state.set_data_problem(None)
+        self.button.set_color("off")
+        # A fresh stop signal for each loop: the previous loop may still be
+        # waiting on its source (up to the 15 s timeout) after a disconnect,
+        # and clearing a shared one would let it run on beside this one.
+        self._stop_glucose_loop = threading.Event()
+        threading.Thread(
+            target=glucose_loop,
+            args=(client, self.button, self.cfg, self._settings_changed, self._stop_glucose_loop),
+            daemon=True,
+        ).start()
+        # button_loop never stops (disconnect leaves it running), so only
+        # the first connection starts it: two would split each press's HID
+        # reports between them and misread the gestures.
+        if self._button_thread is None:
+            self._button_thread = threading.Thread(
                 target=button_loop, args=(self.button, self.cfg, self._settings_changed), daemon=True
-            ).start()
-            self._running = True
-            log.info("Monitoring started for %s", username)
+            )
+            self._button_thread.start()
+        self._running = True
+        log.info("Monitoring started for %s (%s)", account, source_name)
 
     def disconnect(self):
         """Stops the glucose-polling thread and forgets the logged-in
@@ -1081,13 +1238,56 @@ class MonitorController:
             if not self._running:
                 return
             self._running = False
+            source_name = self.source_name
             self.dexcom_username = None
+            self.source = self.source_name = self.account = None
             self._stop_glucose_loop.set()
             self._settings_changed.set()  # wake it immediately instead of waiting out the poll interval
         state.set_latest_reading(None, False)
+        state.set_data_problem(None)
         state.set_currently_lit("off")
         self.button.set_color("off")
-        log.info("Disconnected from Dexcom")
+        log.info("Disconnected from %s", source_name)
+
+    def forget_saved_sources(self):
+        """Clears every saved login and address from the keychain (for the
+        /disconnect route). A method so web_ui needn't import this module:
+        run as a script it's __main__, and importing it again by name loads
+        a second copy -- which, among other things, doubled every log line
+        after the first Disconnect."""
+        clear_saved_credentials()
+
+
+def resume_saved_source(controller, cfg):
+    """At launch: reconnect the glucose source saved last time, if any."""
+    if cfg.get_glucose_source() == "nightscout" or os.environ.get("NIGHTSCOUT_ADDRESS"):
+        address, secret = get_nightscout_credentials()
+        if address:
+            try:
+                controller.start_nightscout(address, secret, verify=False)
+            except Exception as exc:
+                # Only a malformed address gets here (nothing is fetched
+                # yet); keep it saved so the page can show what's wrong.
+                log.warning("Couldn't use the saved Nightscout / xDrip+ address (%s) -- "
+                            "reconnect via the settings page.", exc)
+        return
+
+    username, password, region, _ = get_credentials(interactive=False)
+    if "DEXCOM_REGION" not in os.environ:
+        # The region chosen at login, not "us": an account outside the US
+        # doesn't exist on the US server, so that login would fail (and the
+        # saved login be cleared below) on every launch.
+        region = cfg.get_dexcom_region()
+    if username and password:
+        try:
+            controller.start(username, password, region)
+        except Exception:
+            log.warning(
+                "Login failed using saved/environment credentials. "
+                "Clearing the saved login in %s -- reconnect via "
+                "the settings page.", CREDENTIAL_STORE
+            )
+            clear_saved_credentials()
 
 
 # --------------------------------------------------------------------------
@@ -1333,18 +1533,7 @@ def main():
         # retrying in the background (see LedButton's docstring).
         button = LedButton()
         controller = MonitorController(button, cfg)
-
-        username, password, region, _ = get_credentials(interactive=False)
-        if username and password:
-            try:
-                controller.start(username, password, region)
-            except Exception:
-                log.warning(
-                    "Login failed using saved/environment credentials. "
-                    "Clearing the saved login in %s -- reconnect via "
-                    "the settings page.", CREDENTIAL_STORE
-                )
-                clear_saved_credentials()
+        resume_saved_source(controller, cfg)
 
         from web_ui import create_app
         from werkzeug.serving import make_server

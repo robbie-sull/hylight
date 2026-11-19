@@ -1,9 +1,10 @@
 """Persisted, user-editable settings for the LED button.
 
 Everything here is safe to write to a plain JSON file on disk -- Dexcom
-credentials are NOT stored here, they stay in the OS keychain via the
-`keyring` package (see get_credentials/save_credentials_to_keychain in
-dexcom_led_button.py).
+credentials and the Nightscout / xDrip+ address and token are NOT stored
+here, they stay in the OS keychain via the `keyring` package (see
+get_credentials/save_credentials_to_keychain and the nightscout
+equivalents in dexcom_led_button.py).
 """
 
 import json
@@ -32,6 +33,9 @@ DEFAULTS = {
     "ramp_sensitivity": "medium",
     "on_call_minutes": 60,
     "dexcom_region": "us",
+    # Where glucose comes from: "dexcom" (Dexcom Share) or "nightscout" (a
+    # Nightscout site, or xDrip+ on the same Wi-Fi -- see nightscout.py).
+    "glucose_source": "dexcom",
     "onboarding_done": False,
 }
 
@@ -139,3 +143,7 @@ class Config:
     def get_dexcom_region(self):
         with self._lock:
             return self._data["dexcom_region"]
+
+    def get_glucose_source(self):
+        with self._lock:
+            return self._data["glucose_source"]

@@ -1,9 +1,10 @@
 """Local-only (127.0.0.1) settings web app for the LED button.
 
 Two states:
-  - Not connected yet: "/" shows a Dexcom Share login form. Submitting
-    it validates the credentials against Dexcom, saves them to the
-    Keychain, and starts monitoring.
+  - Not connected yet: "/" asks where glucose comes from -- a Dexcom Share
+    login, or a Nightscout site / xDrip+ phone address (nightscout.py).
+    Submitting either checks it, saves it to the Keychain, and starts
+    monitoring.
   - Connected: "/" shows the settings form (active window, days,
     thresholds, ramp sensitivity, on-demand length). Saving persists to config.py's Config
     and takes effect on the next glucose poll / next press.
@@ -25,6 +26,7 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 
 import onboarding
 from config import DAY_NAMES, ON_CALL_DURATION_CHOICES_MINUTES, RAMP_SENSITIVITY_MG_DL
+from nightscout import NightscoutError
 from settings_form import parse_settings_form
 
 # The real logo artwork (wordmark + sun), background-removed and
@@ -282,6 +284,27 @@ BRAND_HEAD = """
   }
   .status-dot.connected { background: #2FAE66; box-shadow: 0 0 6px #2FAE66; }
   .status-dot.disconnected { background: var(--red); }
+
+  /* Where glucose comes from: two tabs, no script needed. */
+  .source-pick > input[type=radio] { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+  .source-tabs {
+    display: flex; gap: 4px; padding: 4px; margin: 0 0 16px;
+    background: #EEF1F6; border: 1px solid var(--border); border-radius: 12px;
+  }
+  .source-tabs label {
+    flex: 1; margin: 0; padding: 8px 10px; border-radius: 9px; text-align: center;
+    font-weight: 600; font-size: 0.9rem; color: var(--muted); cursor: pointer;
+  }
+  #src-dexcom:checked ~ .source-tabs label[for=src-dexcom],
+  #src-ns:checked ~ .source-tabs label[for=src-ns] {
+    background: #fff; color: var(--ink); box-shadow: 0 1px 3px rgba(45, 35, 32, 0.14);
+  }
+  #src-dexcom:focus-visible ~ .source-tabs label[for=src-dexcom],
+  #src-ns:focus-visible ~ .source-tabs label[for=src-ns] { outline: 2px solid var(--blue); outline-offset: 1px; }
+  #src-dexcom:checked ~ .src-ns, #src-ns:checked ~ .src-dexcom { display: none; }
+  .optional { color: var(--muted); font-weight: 400; }
+  .hint + .hint { margin-top: 8px; }
+  .hint code { font-size: 0.78rem; color: var(--ink); }
 </style>
 </head>
 <body>
@@ -333,6 +356,11 @@ BRAND_FOOT = """
         if (data.latest_value !== null && data.latest_value !== undefined) {
           parts.push("BG " + data.latest_value);
         }
+        // Why there's no current BG (source unreachable, nothing in the
+        // last 10 minutes...), so a dark button can be told from "in range".
+        if (data.data_problem) {
+          parts.push(data.data_problem);
+        }
         if (data.muted) {
           parts.push("muted until " + fmtTime(data.muted_until));
         }
@@ -364,37 +392,77 @@ BRAND_FOOT = """
 </html>
 """
 
+# The Nightscout / xDrip+ half of the "where does glucose come from" choice,
+# shared by the login page and the setup tour's cover (dropped into both
+# templates as text, so it may use their variables: ns_address).
+NIGHTSCOUT_FIELDS = """
+<fieldset>
+  <legend>Nightscout or xDrip+</legend>
+  <label for="ns_address">Address</label>
+  <input type="text" id="ns_address" name="ns_address" value="{{ ns_address or '' }}" required
+         placeholder="https://your-site.example.com" autocomplete="off" autocapitalize="off" spellcheck="false">
+
+  <label for="ns_secret">Access token or secret <span class="optional">(if needed)</span></label>
+  <input type="password" id="ns_secret" name="ns_secret" autocomplete="off">
+  <div class="hint">
+    <b>Nightscout:</b> your site's address, plus an access token with the read-only
+    <i>readable</i> role (Nightscout Admin Tools &rarr; Add new Subject). The API secret
+    works too, but it can also change data, so a token is safer.
+  </div>
+  <div class="hint">
+    <b>xDrip+ on this Wi-Fi:</b> in xDrip+, turn on Settings &rarr; Inter-app settings
+    &rarr; xDrip Web Service, and Open Web Service. Enter
+    <code>http://</code><i>phone's Wi-Fi IP address</i><code>:17580</code>, and its web
+    service secret if you set one.
+  </div>
+</fieldset>
+"""
+
 LOGIN_PAGE = BRAND_HEAD + """
-{% if setup_done %}<div class="success">Your settings are saved. Last step: connect your Dexcom
-account so HyLight can see your glucose.</div>{% endif %}
-<h2 style="margin-top:0;">Connect your Dexcom Share account</h2>
-{% if not setup_done %}<p class="status">No Dexcom account yet, or just looking around?
+{% if setup_done %}<div class="success">Your settings are saved. Last step: connect your glucose
+data so HyLight can see it.</div>{% endif %}
+<h2 style="margin-top:0;">Connect your glucose data</h2>
+{% if not setup_done %}<p class="status">No account yet, or just looking around?
   <a href="{{ url_for('setup', step=2) }}">Take the setup tour</a></p>{% endif %}
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
-<form method="post" action="{{ url_for('login') }}">
-  <fieldset>
-    <legend>Dexcom Share</legend>
-    <label for="username">Username</label>
-    <input type="text" id="username" name="username" required autofocus>
+<div class="source-pick">
+  <input type="radio" name="source_tab" id="src-dexcom" {% if glucose_source != "nightscout" %}checked{% endif %}>
+  <input type="radio" name="source_tab" id="src-ns" {% if glucose_source == "nightscout" %}checked{% endif %}>
+  <div class="source-tabs">
+    <label for="src-dexcom">Dexcom</label>
+    <label for="src-ns">Nightscout or xDrip+</label>
+  </div>
 
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" required>
+  <form class="src-dexcom" method="post" action="{{ url_for('login') }}">
+    <fieldset>
+      <legend>Dexcom Share</legend>
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" required autofocus>
 
-    <label for="region">Region</label>
-    <select id="region" name="region">
-      <option value="us">United States</option>
-      <option value="ous">Outside the US</option>
-      <option value="jp">Japan</option>
-    </select>
-    <div class="hint">
-      Sign in with the Dexcom account of the person wearing the sensor
-      &mdash; not a follower's account. In the Dexcom app: Settings &rarr;
-      Share &rarr; turn Share on and add a follower.
-    </div>
-  </fieldset>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required>
 
-  <button type="submit">Connect</button>
-</form>
+      <label for="region">Region</label>
+      <select id="region" name="region">
+        <option value="us">United States</option>
+        <option value="ous">Outside the US</option>
+        <option value="jp">Japan</option>
+      </select>
+      <div class="hint">
+        Sign in with the Dexcom account of the person wearing the sensor
+        &mdash; not a follower's account. In the Dexcom app: Settings &rarr;
+        Share &rarr; turn Share on and add a follower.
+      </div>
+    </fieldset>
+
+    <button type="submit">Connect</button>
+  </form>
+
+  <form class="src-ns" method="post" action="{{ url_for('login_nightscout') }}">
+""" + NIGHTSCOUT_FIELDS + """
+    <button type="submit">Connect</button>
+  </form>
+</div>
 
 <h2>App</h2>
 <form method="post" action="{{ url_for('quit_app') }}"
@@ -404,7 +472,7 @@ account so HyLight can see your glucose.</div>{% endif %}
 """ + BRAND_FOOT
 
 SETTINGS_PAGE = BRAND_HEAD + """
-<p class="status">Connected as {{ username }} &middot;
+<p class="status">Connected to {{ source_name }} {{ "as" if glucose_source == "dexcom" else "at" }} {{ account }} &middot;
   <a href="{{ url_for('setup', step=1) }}">Take the setup tour</a></p>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 {% if saved %}<div class="success" id="saved-banner">{{ saved_message or "Settings saved." }}</div>{% endif %}
@@ -497,7 +565,7 @@ SETTINGS_PAGE = BRAND_HEAD + """
       {% endfor %}
     </select>
     <div class="hint">
-      Higher catches rises sooner but false-alarms more on noise. Dexcom's rising
+      Higher catches rises sooner but false-alarms more on noise. The CGM's rising
       trend arrow also counts, unless this is Off.
     </div>
   </fieldset>
@@ -521,10 +589,10 @@ SETTINGS_PAGE = BRAND_HEAD + """
   <button type="submit" class="btn-primary">Save settings</button>
 </form>
 
-<h2>Dexcom account</h2>
+<h2>Glucose source</h2>
 <form method="post" action="{{ url_for('disconnect') }}"
-      onsubmit="return confirm('Disconnect this Dexcom account? Monitoring keeps running until you quit the app; on the next launch you will need to reconnect.');">
-  <button type="submit">Disconnect Dexcom account</button>
+      onsubmit="return confirm('Disconnect {{ disconnect_what }}? HyLight stops reading glucose and forgets the saved login. You can connect again any time.');">
+  <button type="submit">Disconnect {{ disconnect_what }}</button>
 </form>
 
 <h2>App</h2>
@@ -602,15 +670,56 @@ def connect_dexcom(controller, form):
     return None
 
 
+def connect_nightscout(controller, form):
+    """Connects a submitted Nightscout / xDrip+ form and starts monitoring.
+    Returns an error message for the page, or None once connected. The
+    NightscoutError messages are written for the person (and carry no
+    token or secret), so they're shown as they are."""
+    address = form.get("ns_address", "").strip()
+    secret = form.get("ns_secret", "").strip()
+    if not address:
+        return "Enter the address of your Nightscout site, or of the phone running xDrip+."
+    try:
+        controller.start_nightscout(address, secret)
+    except NightscoutError as exc:
+        logging.getLogger("led-button").warning("Nightscout / xDrip+ connection failed: %s", exc)
+        return str(exc)
+    except Exception as exc:
+        logging.getLogger("led-button").warning(
+            "Nightscout / xDrip+ connection failed: %s: %s", type(exc).__name__, exc
+        )
+        return "Couldn't connect to that address."
+    return None
+
+
+def connect_source(controller, form):
+    """The setup tour's cover posts either form to one URL; `source` says which."""
+    if form.get("source") == "nightscout":
+        return connect_nightscout(controller, form)
+    return connect_dexcom(controller, form)
+
+
 def create_app(cfg, controller):
     app = Flask(__name__)
     app.jinja_env.filters["duration"] = duration_label
+
+    def render_login(error=None, setup_done=False, source=None, ns_address=""):
+        return render_template_string(
+            LOGIN_PAGE,
+            error=error,
+            setup_done=setup_done,
+            glucose_source=source or cfg.get_glucose_source(),
+            ns_address=ns_address,
+        )
 
     def render_settings(error=None, saved=False, saved_message=None):
         return render_template_string(
             SETTINGS_PAGE,
             cfg=cfg.as_dict(),
-            username=controller.dexcom_username,
+            glucose_source=controller.source,
+            source_name=controller.source_name,
+            account=controller.account,
+            disconnect_what="Dexcom account" if controller.source == "dexcom" else controller.source_name,
             enumerate_days=list(enumerate(DAY_NAMES)),
             ramp_sensitivity_choices=RAMP_SENSITIVITY_MG_DL,
             on_call_choices=ON_CALL_DURATION_CHOICES_MINUTES,
@@ -631,7 +740,7 @@ def create_app(cfg, controller):
             return redirect(url_for("setup", step=1))
         setup_done = request.args.get("setup") == "done"
         if not controller.is_running():
-            return render_template_string(LOGIN_PAGE, error=None, setup_done=setup_done)
+            return render_login(setup_done=setup_done)
         if setup_done:
             return render_settings(saved=True, saved_message="Tour complete. Your settings are saved.")
         return render_settings(saved=request.args.get("saved") == "1")
@@ -640,7 +749,15 @@ def create_app(cfg, controller):
     def login():
         error = connect_dexcom(controller, request.form)
         if error:
-            return render_template_string(LOGIN_PAGE, error=error)
+            return render_login(error=error, source="dexcom")
+        return redirect(url_for("index"))
+
+    @app.route("/login/nightscout", methods=["POST"])
+    def login_nightscout():
+        error = connect_nightscout(controller, request.form)
+        if error:
+            return render_login(error=error, source="nightscout",
+                                ns_address=request.form.get("ns_address", ""))
         return redirect(url_for("index"))
 
     @app.route("/settings", methods=["POST"])
@@ -657,10 +774,8 @@ def create_app(cfg, controller):
 
     @app.route("/disconnect", methods=["POST"])
     def disconnect():
-        from dexcom_led_button import clear_saved_credentials
-
         controller.disconnect()
-        clear_saved_credentials()
+        controller.forget_saved_sources()
         return redirect(url_for("index"))
 
     @app.route("/quit", methods=["POST"])
@@ -674,5 +789,6 @@ def create_app(cfg, controller):
         return render_template_string(RESTART_PAGE)
 
     onboarding.register(app, cfg, controller, BRAND_HEAD, BRAND_FOOT,
-                        lambda form: connect_dexcom(controller, form), LOGO_COVER_B64)
+                        lambda form: connect_source(controller, form), LOGO_COVER_B64,
+                        NIGHTSCOUT_FIELDS)
     return app

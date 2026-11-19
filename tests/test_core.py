@@ -128,6 +128,8 @@ class StatusColorTests(unittest.TestCase):
         self.assertEqual(app.compute_preview_color(120, False, self.cfg), "green")
         self.assertEqual(app.compute_preview_color(120, True, self.cfg), "white")
         self.assertEqual(app.compute_preview_color(60, False, self.cfg), "purple")
+        # No current reading: a tap must not claim "fine".
+        self.assertEqual(app.compute_preview_color(None, False, self.cfg), "off")
 
 
 class ConfigTests(unittest.TestCase):
@@ -466,10 +468,11 @@ class OnboardingTests(unittest.TestCase):
 
     def test_connect_later_ends_on_the_login_page(self):
         self.assertIn("What the light tells you", self.client.get("/setup/2").get_data(as_text=True))
-        self.assertIn("Next, you'll connect your Dexcom account", self.client.get("/setup/6").get_data(as_text=True))
+        self.assertIn("Next, you'll connect your glucose data", self.client.get("/setup/6").get_data(as_text=True))
         r = self.client.post("/setup/6", data={"on_call_minutes": "60"}, follow_redirects=True)
-        self.assertIn(b"Last step: connect your Dexcom", r.data)
+        self.assertIn(b"Last step: connect your glucose", r.data)
         self.assertIn(b'name="password"', r.data)
+        self.assertIn(b'name="ns_address"', r.data)  # Nightscout / xDrip+ is offered too
 
     def test_invalid_step_keeps_what_was_typed_and_saves_nothing(self):
         r = self.client.post("/setup/3", data={"window_start": "19:00", "window_end": "09:00", "active_days": ["1"]})
@@ -498,7 +501,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("What the light tells you", slide.get_data(as_text=True))
         self.assertFalse(self.controller.is_running())
         finished = self.client.post("/setup/6", data={"on_call_minutes": "60"}, follow_redirects=True).get_data(as_text=True)
-        self.assertIn("Last step: connect your Dexcom", finished)
+        self.assertIn("Last step: connect your glucose", finished)
         self.assertNotIn("Take the setup tour", finished)
 
     def test_tour_again_from_settings(self):

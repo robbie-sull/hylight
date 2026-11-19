@@ -1,5 +1,6 @@
-"""First-run setup tour. A cover screen (big logo, the pitch, and the Dexcom
-login if it isn't connected yet), then five screens that explain the lights
+"""First-run setup tour. A cover screen (big logo, the pitch, and the glucose
+connection -- a Dexcom login, or a Nightscout / xDrip+ address -- if there
+isn't one yet), then five screens that explain the lights
 and build the settings one step at a time, around an animated sketch of the
 button and a sample day of glucose. Shown automatically on a fresh install
 and available again later from the settings page.
@@ -160,7 +161,7 @@ SETUP_BODY = """
 
   {% if connected %}
   <div class="connected-card"><span class="status-dot"></span>
-    <span>Connected to Dexcom as <b>{{ username }}</b></span></div>
+    <span>Connected to {{ source_name }} {{ "as" if glucose_source == "dexcom" else "at" }} <b>{{ account }}</b></span></div>
   <form method="post" action="{{ url_for('setup', step=1) }}">
     <button type="submit" class="btn-primary btn-wide">{{ "Start the tour" if tour else "Get started" }}</button>
   </form>
@@ -168,35 +169,53 @@ SETUP_BODY = """
     <button type="submit" class="linklike">{{ "Exit the tour" if tour else "Skip setup" }}</button>
   </form>
   {% else %}
-  <form method="post" action="{{ url_for('setup', step=1) }}" id="connect-form">
-    <fieldset>
-      <legend>Connect your Dexcom account</legend>
-      <label for="username">Username</label>
-      <input type="text" id="username" name="username" value="{{ username or '' }}" required>
+  <div class="source-pick">
+    <input type="radio" name="source_tab" id="src-dexcom" {% if glucose_source != "nightscout" %}checked{% endif %}>
+    <input type="radio" name="source_tab" id="src-ns" {% if glucose_source == "nightscout" %}checked{% endif %}>
+    <div class="source-tabs">
+      <label for="src-dexcom">Dexcom</label>
+      <label for="src-ns">Nightscout or xDrip+</label>
+    </div>
 
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" required>
+    <form class="src-dexcom connect-form" method="post" action="{{ url_for('setup', step=1) }}">
+      <input type="hidden" name="source" value="dexcom">
+      <fieldset>
+        <legend>Connect your Dexcom account</legend>
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" value="{{ username or '' }}" required>
 
-      <label for="region">Region</label>
-      <select id="region" name="region">
-        {% for value, name in regions %}
-        <option value="{{ value }}" {% if value == region %}selected{% endif %}>{{ name }}</option>
-        {% endfor %}
-      </select>
-      <div class="hint">
-        Sign in with the Dexcom account of the person wearing the sensor
-        &mdash; not a follower's account. In the Dexcom app: Settings &rarr;
-        Share &rarr; turn Share on and add a follower.
-      </div>
-    </fieldset>
-    <button type="submit" class="btn-primary btn-wide">Connect and continue</button>
-  </form>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required>
+
+        <label for="region">Region</label>
+        <select id="region" name="region">
+          {% for value, name in regions %}
+          <option value="{{ value }}" {% if value == region %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">
+          Sign in with the Dexcom account of the person wearing the sensor
+          &mdash; not a follower's account. In the Dexcom app: Settings &rarr;
+          Share &rarr; turn Share on and add a follower.
+        </div>
+      </fieldset>
+      <button type="submit" class="btn-primary btn-wide">Connect and continue</button>
+    </form>
+
+    <form class="src-ns connect-form" method="post" action="{{ url_for('setup', step=1) }}">
+      <input type="hidden" name="source" value="nightscout">
+__NIGHTSCOUT_FIELDS__
+      <button type="submit" class="btn-primary btn-wide">Connect and continue</button>
+    </form>
+  </div>
   <p class="cover-later"><a href="{{ url_for('setup', step=2) }}">Connect later</a> and look around first</p>
   <script>
   (function () {
-    var form = document.getElementById("connect-form"), btn = form.querySelector("button");
-    form.addEventListener("submit", function () { btn.disabled = true; btn.textContent = "Connecting\\u2026"; });
-    window.addEventListener("pageshow", function () { btn.disabled = false; btn.textContent = "Connect and continue"; });
+    Array.prototype.forEach.call(document.querySelectorAll(".connect-form"), function (form) {
+      var btn = form.querySelector("button");
+      form.addEventListener("submit", function () { btn.disabled = true; btn.textContent = "Connecting\\u2026"; });
+      window.addEventListener("pageshow", function () { btn.disabled = false; btn.textContent = "Connect and continue"; });
+    });
   })();
   </script>
   {% endif %}
@@ -333,7 +352,7 @@ SETUP_BODY = """
         </label>
         {% endfor %}
       </div>
-      <div class="hint">Dexcom's own rising trend arrow also counts, unless this is Off.</div>
+      <div class="hint">Your CGM's own rising trend arrow also counts, unless this is Off.</div>
     </fieldset>
 
     {% elif scene == "ondemand" %}
@@ -356,7 +375,7 @@ SETUP_BODY = """
       <button type="submit" class="btn-primary">{{ next_label }}</button>
     </div>
     {% if step == last_step and not connected %}
-    <p class="setup-after">Next, you'll connect your Dexcom account.</p>
+    <p class="setup-after">Next, you'll connect your glucose data.</p>
     {% endif %}
   </form>
 
@@ -766,7 +785,7 @@ SETUP_BODY = """
 
 STEP_TEXT = {
     1: ("Glucose awareness, right when you need it",
-        "HyLight sits on your desk and watches your Dexcom for you. During the hours you choose, "
+        "HyLight sits on your desk and watches your CGM for you. During the hours you choose, "
         "it lights up the moment your glucose starts to climb, so you can act early without "
         "checking your phone.",
         ""),
@@ -799,10 +818,13 @@ STEP_TEXT = {
 REGIONS = [("us", "United States"), ("ous", "Outside the US"), ("jp", "Japan")]
 
 
-def register(app, cfg, controller, brand_head, brand_foot, connect_dexcom, cover_logo_b64):
-    """connect_dexcom(form) logs in with the cover's form and starts
-    monitoring, returning an error message or None once connected."""
-    page = brand_head + SETUP_BODY + brand_foot
+def register(app, cfg, controller, brand_head, brand_foot, connect, cover_logo_b64,
+             nightscout_fields=""):
+    """connect(form) connects whichever source the cover's form was for
+    (its `source` field: "dexcom" or "nightscout") and starts monitoring,
+    returning an error message or None once connected. nightscout_fields is
+    the Nightscout / xDrip+ fieldset, shared with the login page."""
+    page = brand_head + SETUP_BODY.replace("__NIGHTSCOUT_FIELDS__", nightscout_fields) + brand_foot
 
     def render(step, error=None, form=None):
         shown = cfg.as_dict()
@@ -850,7 +872,11 @@ def register(app, cfg, controller, brand_head, brand_foot, connect_dexcom, cover
             next_label=next_label,
             tour=tour,
             connected=connected,
-            username=controller.dexcom_username if connected else (form or {}).get("username", ""),
+            glucose_source=controller.source if connected else (form or {}).get("source") or cfg.get_glucose_source(),
+            source_name=controller.source_name,
+            account=controller.account,
+            username=(form or {}).get("username", ""),
+            ns_address=(form or {}).get("ns_address", ""),
             regions=REGIONS,
             region=(form or {}).get("region", "us"),
             cover_logo=cover_logo_b64,
@@ -863,7 +889,7 @@ def register(app, cfg, controller, brand_head, brand_foot, connect_dexcom, cover
             return redirect(url_for("setup", step=1))
         if request.method == "POST":
             if step == 1 and not controller.is_running():
-                error = connect_dexcom(request.form)
+                error = connect(request.form)
                 if error:
                     return render(1, error=error, form=request.form)
             values, error = parse_settings_form(request.form, STEP_GROUPS[step])

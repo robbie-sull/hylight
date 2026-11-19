@@ -37,8 +37,8 @@ from PyInstaller.utils.win32.versioninfo import (
     VSVersionInfo,
 )
 
-VERSION = (0, 6, 1, 0)
-VERSION_STR = "0.6.1"
+VERSION = (0, 7, 0, 0)
+VERSION_STR = "0.7.0"
 
 datas = [
     # web_ui.py reads this at import time to inline the header logo, and
@@ -56,6 +56,7 @@ hiddenimports = [
     "onboarding",
     "settings_form",
     "config",
+    "nightscout",
     # Imported lazily in main() on Windows only.
     "tray_loop",
     "pystray._win32",

@@ -1,26 +1,28 @@
 # HyLight ("Danko Panko's HyLight") -- project context
 
 A small desktop app that drives a physical USB LED button as a glucose indicator. It polls
-the owner's Dexcom CGM through the Dexcom Share API, lights the button a color for the
-current status, and serves a local settings page. The macOS version is built and in pilot
-testing. **The current job is a Windows version.** The owner tests on real hardware and
-reports what they see by eye; Claude cannot see the LED.
+the owner's Dexcom CGM through the Dexcom Share API -- or, since v0.7.0, a Nightscout site or
+xDrip+ on the same Wi-Fi -- lights the button a color for the current status, and serves a
+local settings page. Mac and Windows builds are done and in pilot testing. The owner tests on
+real hardware and reports what they see by eye; Claude cannot see the LED.
 
 ## File map
 
 | File | Role |
 |---|---|
 | `dexcom_led_button.py` | Entry point + everything runtime: HID wrapper (`LedButton`), glucose loop, button gestures, `MonitorController`, single-instance lock, shutdown/relaunch. The module docstring is the detailed behavior spec -- read it. |
-| `web_ui.py` | Local Flask settings UI (127.0.0.1:8765). One file, inline HTML/CSS/JS, logo embedded as base64 (`assets/logo_header_b64.txt`; the tour cover uses the larger `assets/logo_cover_b64.txt`). `connect_dexcom()` is the Dexcom login shared by `/login` and the tour cover. Routes: `/`, `/login`, `/settings`, `/disconnect`, `/quit`, `/restart`, `/status`. |
-| `onboarding.py` | First-run setup tour (`/setup/1`-`/setup/6`, `/setup/exit`): a cover (big logo, pitch, Dexcom login unless already connected, or "Connect later"), then how the lights work, active window, high levels, ramp sensitivity, on-demand. Each step saves its own settings. Animated SVG scene (sketched button + sample-day chart) drawn by inline JS that mirrors the app's light rules; on the lights and ramp screens the line is drawn in the color the button shows, and the ramp screen uses its own unlabeled yellow line (160) and leaves red out. Shown automatically while `onboarding_done` is false (fresh installs only; older config files count as done), and from "Take the setup tour" links on the settings page and on the Dexcom login page (the latter goes straight to `/setup/2`, so people without an account can look around). |
+| `web_ui.py` | Local Flask settings UI (127.0.0.1:8765). One file, inline HTML/CSS/JS, logo embedded as base64 (`assets/logo_header_b64.txt`; the tour cover uses the larger `assets/logo_cover_b64.txt`). The connect page and the tour cover offer two tabs, Dexcom and "Nightscout or xDrip+" (CSS-only radio tabs; `NIGHTSCOUT_FIELDS` is the shared fieldset). `connect_dexcom()` / `connect_nightscout()` do the connecting; `connect_source()` picks one by the cover form's `source` field. Routes: `/`, `/login`, `/login/nightscout`, `/settings`, `/disconnect`, `/quit`, `/restart`, `/status`. Template variable for the source is `glucose_source` (`source` clashes with `render_template_string`'s own argument). |
+| `onboarding.py` | First-run setup tour (`/setup/1`-`/setup/6`, `/setup/exit`): a cover (big logo, pitch, the Dexcom / Nightscout-or-xDrip+ connection unless already connected, or "Connect later"), then how the lights work, active window, high levels, ramp sensitivity, on-demand. Each step saves its own settings. Animated SVG scene (sketched button + sample-day chart) drawn by inline JS that mirrors the app's light rules; on the lights and ramp screens the line is drawn in the color the button shows, and the ramp screen uses its own unlabeled yellow line (160) and leaves red out. Shown automatically while `onboarding_done` is false (fresh installs only; older config files count as done), and from "Take the setup tour" links on the settings page and on the connect page (the latter goes straight to `/setup/2`, so people without an account can look around). |
 | `settings_form.py` | `parse_settings_form(form, groups)`: parsing + validation shared by the settings page and the tour. |
-| `config.py` | `Config`: JSON settings in `~/.dexcom_led_button/config.json`. |
+| `config.py` | `Config`: JSON settings in `~/.dexcom_led_button/config.json`. `glucose_source` is `"dexcom"` (default) or `"nightscout"`. |
+| `nightscout.py` | The Nightscout / xDrip+ source: `Nightscout` offers pydexcom's `get_current_glucose_reading()` and `get_glucose_readings()` with the same meaning, so `glucose_loop` takes either. `parse_address()` turns what's typed into a base URL + credential. Module docstring lists the facts it relies on. Uses `requests` (already bundled via pydexcom). |
 | `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work. |
 | `tray_loop.py` | **Windows only** (pystray + Pillow). Tray icon: "Open HyLight Settings" (also left-click) and "Quit HyLight". Runs on its own thread; `main()` keeps `serve_forever()` and stops the icon in its `finally`. |
 | `HyLight.spec` | **macOS** PyInstaller spec -> `HyLight.app`. |
 | `HyLight_win.spec` | **Windows** PyInstaller spec -> `dist/HyLight/HyLight.exe` (onedir, no console, Credential Manager + pystray backends, version info). Only builds on Windows. |
 | `build_windows.bat` | Windows build via `uv` (Python 3.13): runs the spec, then zips `dist/HyLight` + the Windows guide into `dist/HyLight-Windows-<ver>.zip`. |
 | `tests/test_core.py` | Platform-independent tests, all against fakes. `python3 -m unittest discover -s tests -v` |
+| `tests/test_nightscout.py` | The Nightscout / xDrip+ source, against throwaway 127.0.0.1 servers that mimic Nightscout's and xDrip+'s auth rules; 1-minute data vs. ramp timing; stale-data rules; source switching. Reuses `test_core`'s isolation (imports it first). |
 | `assets/` | `HyLight.icns` (mac), `HyLight.ico` (Windows; padding trimmed, 16-256 px), `HyLight_icon_1024.png` (source art, also the tray icon), header logo files. |
 | `pilot_release/Read Me First.txt` | Tester guide that ships in the Mac zips. Keep it in sync with behavior. |
 | `pilot_release/Read Me First (Windows).txt` | Windows tester guide (shipped as `Read Me First.txt` in the Windows zip). Keep in sync too. |
@@ -43,6 +45,11 @@ reports what they see by eye; Claude cannot see the LED.
   earlier "reminder timer" double-tap feature.)
 - **Settings** (web page): active days/window, yellow & red thresholds, ramp sensitivity, on-demand
   length. Saved immediately and the glucose loop is woken.
+- **Stale data.** A reading counts as current for 10 minutes (`CURRENT_READING_MAX_AGE`, pydexcom's
+  own rule). When a poll finds none, the cached value is dropped; when the source can't be reached,
+  the light is kept only until the last reading turns 10 minutes old, then goes off. A tap with no
+  current reading stays dark (green would claim "fine" with nothing behind it). The status line
+  shows `data_problem` (from `/status`) saying why there's no BG.
 - Ramp detection needs the Dexcom trend arrow OR a rise over ~15 min (latest reading vs the newest
   one at least 14 min older; before v0.6 this was mistakenly 10 min) of at least the sensitivity's
   amount (High 8 / Medium 14 / Low 20 mg/dL, `config.RAMP_SENSITIVITY_MG_DL`), confirmed over 2
@@ -85,10 +92,40 @@ button reads both use `interface_number == 0`**.
 - Dexcom has a new reading about every 5 minutes; the app polls every 60 s.
 - Credentials live only in the OS keyring (`keyring`, service `dexcom_led_button`), never in files.
 
+## Nightscout / xDrip+ facts (checked against both projects' source, Nov 2026)
+
+- Both answer `GET /api/v1/entries/sgv.json?count=N`, newest first; xDrip+ also at `/sgv.json`.
+  `sgv` is always mg/dL (xDrip+ says so even when the person displays mmol/L); `date` is epoch ms;
+  `direction` uses Dexcom's names. Values under 39 are error codes (skipped); 39 = LOW, 401 = HIGH.
+- **Nightscout auth:** `?token=<access token>` (tokens look like `name-<16 hex>`; a "readable" role
+  token is all HyLight needs), or `api-secret: sha1hex(API_SECRET)`. The API secret grants write
+  access -- recommend a token. Failed auth gets an IP-based delay on the server.
+- **xDrip+ web service:** Settings > Inter-app settings > xDrip Web Service, plus "Open Web Service"
+  for other devices (otherwise it binds 127.0.0.1 only). Port 17580 http (17581 https with a
+  self-signed localhost cert -- useless from another device). With "xDrip Web Service Secret" set,
+  non-local requests need `api-secret: sha1hex(secret)`; with **no** secret set, a request that
+  sends the header anyway gets 403. So the header is only sent when the user typed a secret.
+  Example from xDrip+'s docs: sha1("Abc") = 915858afa2278f25527f192038108346164b47f2.
+- **Cadence:** Libre 2/3 via xDrip+ or Juggluco can give a reading every minute. HyLight's ramp rules
+  assume Dexcom's 5 minutes, so `get_glucose_readings()` thins history to >= 4.5 min apart and only
+  moves its newest ("anchor") reading on 4.5+ min later; `detect_ramp` and `State` are unchanged and
+  5-minute data passes through as is. Tested: same confirmation timing on 1- and 5-minute data.
+- `requests` errors quote the full URL (with `?token=`), so `nightscout._fetch` re-raises them as
+  `NightscoutError` `from None`, with person-readable messages and no credential. Keep it that way:
+  testers send the log file.
+- At launch a saved address is resumed with `verify=False` (phone off the Wi-Fi, free-tier site
+  waking up) and never cleared for being unreachable. Connecting from the page verifies first.
+- macOS 15+ gates connections to LAN addresses (the xDrip+ path) behind Local Network permission;
+  `HyLight.spec` sets `NSLocalNetworkUsageDescription`. Nightscout (internet) isn't affected.
+
 ## Runtime data
 
 `~/.dexcom_led_button/` holds `config.json`, `app.lock` (PID, single-instance), `hylight.log`
-(rotating). Port `8765` (not 5000: macOS AirPlay Receiver squats on it). Old config key
+(rotating). Keyring service `dexcom_led_button` holds `username`/`password` (Dexcom) and
+`nightscout_address`/`nightscout_secret` (stored exactly as typed); Disconnect clears all four.
+At launch the Dexcom login uses the saved `dexcom_region` (it used "us" always before v0.7.0, which
+failed -- and cleared the saved login -- for accounts outside the US).
+Port `8765` (not 5000: macOS AirPlay Receiver squats on it). Old config key
 `orange_threshold` is migrated to `yellow_threshold` on load.
 
 ## Windows port -- what to do
@@ -155,6 +192,7 @@ relaunch, Keychain wording in log messages, `LSMinimumSystemVersion`/BUNDLE sett
 - Dev setup: Python 3.9+, `pip install pydexcom hidapi keyring flask` (+ `pystray pillow` on Windows,
   + `pyinstaller` to build).
   Run from source: `python3 dexcom_led_button.py` (opens http://127.0.0.1:8765).
+  `NIGHTSCOUT_ADDRESS` / `NIGHTSCOUT_SECRET` env vars start it on a Nightscout / xDrip+ source.
 
 ## Branding (for any new UI/assets)
 
