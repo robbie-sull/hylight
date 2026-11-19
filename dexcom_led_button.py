@@ -79,6 +79,15 @@ reconnects and repaints the correct color within about half a second
 of being plugged back in -- no restart needed. Same if the app itself
 is started while the button happens to not be plugged in yet.
 
+A powered hub or dock can keep the button powered after the laptop is
+unplugged from it, and the button then keeps showing its last color --
+nothing can reach it once the cable is out, and unplugging gives no
+warning. What the app can do: in the packaged Mac app the light turns
+off just before the computer sleeps and stays off until a real wake,
+then shows a fresh reading. Pulling the cable from an awake laptop still
+leaves the last color; the fix for that is a hub/monitor setting that
+cuts USB power without a computer, or a port that does.
+
 Ramp (white) detection -- how this was chosen
 ------------------------------------------------
 Looking at several weeks of your Tandem/Dexcom reports, post-lunch
@@ -350,6 +359,7 @@ class LedButton:
         self._last_reopen_attempt = 0.0
         self._needs_refresh = False
         self._closed = False
+        self._held_off = False
         self._reopen()
         if not self.connected:
             log.warning(
@@ -388,6 +398,10 @@ class LedButton:
         enable, r, g, b = COLORS[name]
         try:
             with self.lock:
+                # Checked under the lock, so a write racing hold_off() can't
+                # land after its "off".
+                if self._held_off and name != "off":
+                    return
                 report = [0x00, enable, r, g, b]
                 if sys.platform == "win32":
                     self.device.write(report)
@@ -459,6 +473,20 @@ class LedButton:
             # transition would otherwise never be observed as a step
             # from False to True.
             self._needs_refresh = True
+
+    def hold_off(self):
+        """Turns the LED off and keeps it off until release_hold(): any
+        other color asked for meanwhile is dropped. Used while the
+        computer sleeps -- see MonitorController.system_will_sleep."""
+        with self.lock:
+            self._held_off = True
+        self.set_color("off")
+
+    def release_hold(self):
+        """Ends hold_off(). Returns whether the light was being held off."""
+        with self.lock:
+            was_held, self._held_off = self._held_off, False
+        return was_held
 
     def consume_needs_refresh(self):
         """Returns True once per (re)connect, so a caller can push the
@@ -1227,6 +1255,27 @@ class MonitorController:
         self._running = True
         log.info("Monitoring started for %s (%s)", account, source_name)
 
+    def system_will_sleep(self):
+        """The computer is about to sleep (macOS: native_loop). Nothing can
+        update the light while it's asleep, and if a laptop is then pulled
+        off a powered hub the button keeps showing its last color for as
+        long as the hub powers it -- so turn it off now and hold it off
+        until a real wake (brief maintenance "dark wakes" don't count)."""
+        log.info("Computer going to sleep -- light off until it wakes")
+        self.button.hold_off()
+        state.set_currently_lit("off")
+
+    def system_did_wake(self):
+        """Ends system_will_sleep's hold. The light stays off until a fresh
+        Dexcom reading says otherwise, rather than reshowing a color that may
+        be hours old, and glucose_loop is woken to fetch one now. Safe to
+        call when nothing is being held (it then does nothing)."""
+        if not self.button.release_hold():
+            return
+        log.info("Computer woke -- checking glucose")
+        state.set_currently_lit("off")
+        self._settings_changed.set()
+
     def disconnect(self):
         """Stops the glucose-polling thread and forgets the logged-in
         session, so / falls back to the login screen. Credentials
@@ -1589,7 +1638,13 @@ def main():
                 log.info("App reopened -- opening the settings page")
                 threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
-            native_loop.run(server.serve_forever, _on_native_terminate, _on_native_reopen)
+            native_loop.run(
+                server.serve_forever,
+                _on_native_terminate,
+                _on_native_reopen,
+                on_sleep=controller.system_will_sleep,
+                on_wake=controller.system_did_wake,
+            )
         else:
             if sys.platform == "win32":
                 tray_icon = _start_tray(url, controller, button, server)

@@ -7,6 +7,8 @@ nothing. Running a real NSApplication on the main thread fixes both:
   - Quit (Dock, the menu bar, Cmd+Q, logout) -> on_terminate() runs the
     app's normal cleanup (LED off, release the lock), then the app exits.
   - Re-opening the running app (double-click, Dock icon) -> on_reopen().
+  - The computer about to sleep / waking up -> on_sleep() / on_wake()
+    (turns the light off for the night; see MonitorController).
 
 The Flask server runs on a background thread instead; when it stops
 (Quit/Restart buttons on the settings page, SIGTERM), this loop is
@@ -16,6 +18,7 @@ Only imported by the packaged build -- running the script from source
 keeps the simple blocking server loop in dexcom_led_button.main().
 """
 
+import logging
 import threading
 
 from AppKit import (
@@ -27,11 +30,17 @@ from AppKit import (
     NSMenuItem,
     NSObject,
     NSTerminateNow,
+    NSWorkspace,
+    NSWorkspaceDidWakeNotification,
+    NSWorkspaceScreensDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
 )
 from Foundation import NSPoint, NSTimer
 from PyObjCTools import AppHelper
 
 _hooks = {}
+_sleep_observers = []
+log = logging.getLogger("led-button")
 
 
 class _AppDelegate(NSObject):
@@ -73,12 +82,42 @@ def _stop_loop():
     app.postEvent_atStart_(event, True)
 
 
-def run(serve_forever, on_terminate, on_reopen):
+def _quietly(fn):
+    """An exception escaping into Cocoa would take the whole app down."""
+    def handler(note):
+        try:
+            fn()
+        except Exception:
+            log.exception("Sleep/wake handler failed")
+    return handler
+
+
+def watch_sleep(on_sleep, on_wake):
+    """Calls on_sleep just before the computer sleeps (macOS waits for it)
+    and on_wake when it fully wakes. The screens waking is a second wake
+    signal in case the first is ever missed; displays only wake on a full
+    wake, never a dark one, and on_wake must be harmless to call twice."""
+    center = NSWorkspace.sharedWorkspace().notificationCenter()
+    for name, fn in [
+        (NSWorkspaceWillSleepNotification, on_sleep),
+        (NSWorkspaceDidWakeNotification, on_wake),
+        (NSWorkspaceScreensDidWakeNotification, on_wake),
+    ]:
+        # queue=None: delivered right away on the posting (main) thread,
+        # so the light is off before the system goes to sleep.
+        _sleep_observers.append(
+            center.addObserverForName_object_queue_usingBlock_(name, None, None, _quietly(fn))
+        )
+    log.info("Watching for sleep/wake (light off while the computer sleeps)")
+
+
+def run(serve_forever, on_terminate, on_reopen, on_sleep, on_wake):
     """Runs serve_forever on a background thread and the Cocoa event loop
     on this (main) thread. Returns once serve_forever returns, or never
     if macOS quits the app first (on_terminate runs, then the app exits)."""
     _hooks["on_terminate"] = on_terminate
     _hooks["on_reopen"] = on_reopen
+    watch_sleep(on_sleep, on_wake)
 
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)

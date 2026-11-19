@@ -1,4 +1,4 @@
-HYLIGHT PILOT FOR WINDOWS  -  v0.7.0                    Danko Panko's HyLight
+HYLIGHT PILOT FOR WINDOWS  -  v0.7.1                    Danko Panko's HyLight
 ==========================================================================
 
 HyLight turns your HyLight button into a glucose light. It reads your Dexcom
@@ -146,6 +146,12 @@ IF SOMETHING LOOKS WRONG
     running, and - for Nightscout - that it's still uploading.
  "Couldn't reach ...": check the address. For xDrip+, check the phone is
     on the same Wi-Fi with the web service on, and its IP hasn't changed.
+ Light stays on after you unplug your laptop: your hub, dock or monitor is
+    still powering the button, and it keeps showing its last color, since
+    nothing can reach the button once the cable is out. To fix it, turn
+    off the hub's or monitor's "USB power in standby" (or "always-on USB")
+    setting, or plug the button into a port that turns off without a
+    computer.
 
 
 FEEDBACK

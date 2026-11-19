@@ -16,13 +16,15 @@ real hardware and reports what they see by eye; Claude cannot see the LED.
 | `settings_form.py` | `parse_settings_form(form, groups)`: parsing + validation shared by the settings page and the tour. |
 | `config.py` | `Config`: JSON settings in `~/.dexcom_led_button/config.json`. `glucose_source` is `"dexcom"` (default) or `"nightscout"`. |
 | `nightscout.py` | The Nightscout / xDrip+ source: `Nightscout` offers pydexcom's `get_current_glucose_reading()` and `get_glucose_readings()` with the same meaning, so `glucose_loop` takes either. `parse_address()` turns what's typed into a base URL + credential. Module docstring lists the facts it relies on. Uses `requests` (already bundled via pydexcom). |
-| `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work. |
+| `native_loop.py` | **macOS only** (PyObjC/AppKit). Cocoa event loop so Dock>Quit and double-click-to-reopen work, and the sleep/wake watcher (`watch_sleep`). |
 | `tray_loop.py` | **Windows only** (pystray + Pillow). Tray icon: "Open HyLight Settings" (also left-click) and "Quit HyLight". Runs on its own thread; `main()` keeps `serve_forever()` and stops the icon in its `finally`. |
 | `HyLight.spec` | **macOS** PyInstaller spec -> `HyLight.app`. |
 | `HyLight_win.spec` | **Windows** PyInstaller spec -> `dist/HyLight/HyLight.exe` (onedir, no console, Credential Manager + pystray backends, version info). Only builds on Windows. |
 | `build_windows.bat` | Windows build via `uv` (Python 3.13): runs the spec, then zips `dist/HyLight` + the Windows guide into `dist/HyLight-Windows-<ver>.zip`. |
-| `tests/test_core.py` | Platform-independent tests, all against fakes. `python3 -m unittest discover -s tests -v` |
+| `tests/test_core.py` | Platform-independent tests, all against fakes. `python3 -m unittest discover -s tests -v` (the macOS notification test only runs where PyObjC is installed, e.g. `.venv/bin/python`). |
 | `tests/test_nightscout.py` | The Nightscout / xDrip+ source, against throwaway 127.0.0.1 servers that mimic Nightscout's and xDrip+'s auth rules; 1-minute data vs. ramp timing; stale-data rules; source switching. Reuses `test_core`'s isolation (imports it first). |
+| `tests/packaged_app_test.sh` | End-to-end test of a built `HyLight.app` in a throwaway HOME with a null keyring: `zsh tests/packaged_app_test.sh path/to/HyLight.app`. Quit your own HyLight first (it refuses to run while port 8765 answers). |
+| `requirements-mac.txt` | Exact versions for the Mac build: `/usr/bin/python3 -m venv .venv && .venv/bin/pip install -r requirements-mac.txt`, then `.venv/bin/pyinstaller HyLight.spec --noconfirm`. Keep the build env in `.venv`, not a temp folder: macOS clears files in `/tmp` after a few days. |
 | `assets/` | `HyLight.icns` (mac), `HyLight.ico` (Windows; padding trimmed, 16-256 px), `HyLight_icon_1024.png` (source art, also the tray icon), header logo files. |
 | `pilot_release/Read Me First.txt` | Tester guide that ships in the Mac zips. Keep it in sync with behavior. |
 | `pilot_release/Read Me First (Windows).txt` | Windows tester guide (shipped as `Read Me First.txt` in the Windows zip). Keep in sync too. |
@@ -50,6 +52,14 @@ real hardware and reports what they see by eye; Claude cannot see the LED.
   the light is kept only until the last reading turns 10 minutes old, then goes off. A tap with no
   current reading stays dark (green would claim "fine" with nothing behind it). The status line
   shows `data_problem` (from `/status`) saying why there's no BG.
+- **Sleep.** A powered hub/dock can keep the button lit after the laptop is unplugged (the button
+  holds its last color while powered; nothing can reach it once the cable is out). So before the
+  computer sleeps, `MonitorController.system_will_sleep()` turns the light off and
+  `LedButton.hold_off()` drops every other color until `system_did_wake()` -- dark wakes that
+  run a poll mid-sleep can't relight it. On wake the light stays off until a fresh reading.
+  macOS: wired in `native_loop.watch_sleep` (packaged app only). **Windows: not yet** -- call the
+  same two controller methods on `WM_POWERBROADCAST` `PBT_APMSUSPEND` / `PBT_APMRESUMEAUTOMATIC`
+  (needs a hidden message window; pystray doesn't expose power events).
 - Ramp detection needs the Dexcom trend arrow OR a rise over ~15 min (latest reading vs the newest
   one at least 14 min older; before v0.6 this was mistakenly 10 min) of at least the sensitivity's
   amount (High 8 / Medium 14 / Low 20 mg/dL, `config.RAMP_SENSITIVITY_MG_DL`), confirmed over 2

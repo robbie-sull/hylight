@@ -9,6 +9,7 @@ USB button. Keep it that way: an early smoke test against the real Keychain
 deleted the owner's saved Dexcom login.
 """
 
+import importlib.util
 import json
 import sys
 import tempfile
@@ -672,6 +673,88 @@ class LedWriteTests(unittest.TestCase):
             button.set_color("red")
         button.device.send_feature_report.assert_called_once_with([0x00, *app.COLORS["red"]])
         button.device.write.assert_not_called()
+
+
+class SleepTests(unittest.TestCase):
+    """The light goes off before the computer sleeps and stays off until it
+    wakes -- a laptop pulled off a powered hub would otherwise leave the
+    button showing its last color."""
+
+    def setUp(self):
+        _keychain.clear()
+        config_module.CONFIG_PATH.unlink(missing_ok=True)
+        app.state.__init__()
+        patcher = mock.patch.object(app, "Dexcom", FakeDexcom)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, FakeDexcom, "next_value", None)
+        with mock.patch.object(app.hid, "enumerate", return_value=[]):
+            self.button = app.LedButton()
+        self.button.device = mock.Mock()
+        self.button.device.read.return_value = []
+        self.button.connected = True
+
+    def written(self):
+        names = {tuple(v): k for k, v in app.COLORS.items()}
+        calls = self.button.device.send_feature_report.call_args_list + self.button.device.write.call_args_list
+        return [names[tuple(c.args[0][1:])] for c in calls]
+
+    def wait_for(self, predicate, timeout=3):
+        deadline = time.time() + timeout
+        while not predicate() and time.time() < deadline:
+            time.sleep(0.02)
+        return predicate()
+
+    def test_hold_drops_colors_until_released(self):
+        self.button.hold_off()
+        self.button.set_color("red")
+        self.button.set_color("off")
+        self.assertEqual(self.written(), ["off", "off"])
+        self.assertTrue(self.button.release_hold())
+        self.assertFalse(self.button.release_hold())
+        self.button.set_color("red")
+        self.assertEqual(self.written()[-1], "red")
+
+    def test_sleep_then_wake_through_the_real_loop(self):
+        cfg = fresh_config()
+        controller = app.MonitorController(self.button, cfg)
+        self.addCleanup(controller.disconnect)
+        app.state.start_on_call(datetime.now(), timedelta(hours=1))  # active whatever the time of day
+        FakeDexcom.next_value = 250
+        controller.start("wearer", "x", "us")
+        self.assertTrue(self.wait_for(lambda: "red" in self.written()))
+
+        controller.system_will_sleep()
+        self.assertEqual(self.written()[-1], "off")
+        self.assertEqual(app.state.get_currently_lit(), "off")
+
+        # A maintenance "dark wake" can run a poll mid-sleep: it must not relight.
+        before = len(self.written())
+        controller.notify_settings_changed()
+        self.assertTrue(self.wait_for(lambda: app.state.get_currently_lit() == "red"))
+        self.assertEqual(self.written()[before:], [])
+
+        controller.system_did_wake()
+        self.assertTrue(self.wait_for(lambda: self.written()[before:] == ["red"]))
+        controller.system_did_wake()  # a second wake signal does nothing
+        time.sleep(0.2)
+        self.assertEqual(self.written()[before:], ["red"])
+
+    @unittest.skipUnless(sys.platform == "darwin" and importlib.util.find_spec("AppKit"), "needs PyObjC on macOS")
+    def test_mac_sleep_and_wake_notifications_reach_the_handlers(self):
+        import native_loop
+        from AppKit import (NSWorkspace, NSWorkspaceDidWakeNotification,
+                            NSWorkspaceScreensDidWakeNotification, NSWorkspaceWillSleepNotification)
+        calls = []
+        start = len(native_loop._sleep_observers)
+        native_loop.watch_sleep(lambda: calls.append("sleep"), lambda: calls.append("wake"))
+        center = NSWorkspace.sharedWorkspace().notificationCenter()
+        self.addCleanup(lambda: [center.removeObserver_(o) for o in native_loop._sleep_observers[start:]])
+        for name in (NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification):
+            center.postNotificationName_object_(name, None)
+        self.assertEqual(calls, ["sleep", "wake", "wake"])
+        native_loop.watch_sleep(lambda: 1 / 0, lambda: None)  # a failing handler is logged, not raised into Cocoa
+        center.postNotificationName_object_(NSWorkspaceWillSleepNotification, None)
 
 
 class PidCheckTests(unittest.TestCase):
